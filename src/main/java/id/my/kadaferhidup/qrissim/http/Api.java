@@ -32,6 +32,11 @@ public final class Api implements HttpHandler {
     private static final Pattern CANCEL = Pattern.compile("^/api/invoices/([A-Z0-9]{1,32})/cancel$");
     private static final Pattern STATIC_QR = Pattern.compile("^/api/merchants/([A-Z0-9]{1,32})/static-qr$");
     private static final Pattern WALLET = Pattern.compile("^/api/wallets/([A-Z0-9]{1,32})$");
+    private static final Pattern WALLET_RESET = Pattern.compile("^/api/wallets/([A-Z0-9]{1,32})/reset$");
+
+    /** Owner name and starting balance of every visitor's demo wallet. */
+    public record DemoWallet(String owner, String pin, long balance) {
+    }
 
     private final PaymentService svc;
     private final WebhookDispatcher webhooks;
@@ -39,9 +44,11 @@ public final class Api implements HttpHandler {
     private final DemoMerchant demo;
     private final EventHub hub;
     private final StaticFiles files;
+    private final DemoWallet demoWallet;
 
     public Api(PaymentService svc, WebhookDispatcher webhooks, Map<String, WebhookEndpoint> endpoints, DemoMerchant demo,
-               EventHub hub, StaticFiles files) {
+               EventHub hub, StaticFiles files, DemoWallet demoWallet) {
+        this.demoWallet = demoWallet;
         this.svc = svc;
         this.webhooks = webhooks;
         this.endpoints = endpoints;
@@ -123,15 +130,15 @@ public final class Api implements HttpHandler {
             Payment pay = svc.pay(new PaymentService.PayRequest(str(b, "payload"), amount, str(b, "wallet_id"),
                     str(b, "pin"), key));
             json(ex, 201, pay);
+        } else if (p.equals("/api/wallets")) {
+            requireMethod(m, "POST");
+            json(ex, 201, walletView(svc.createDemoWallet(demoWallet.owner(), demoWallet.pin(), demoWallet.balance())));
         } else if ((mt = WALLET.matcher(p)).matches()) {
             requireMethod(m, "GET");
-            Wallet w = svc.wallet(mt.group(1));
-            Map<String, Object> v = new LinkedHashMap<>();
-            v.put("id", w.id());
-            v.put("owner", w.owner());
-            v.put("balance", w.balance());
-            v.put("locked", w.lockedAt(svc.now()));
-            json(ex, 200, v);
+            json(ex, 200, walletView(svc.wallet(mt.group(1))));
+        } else if ((mt = WALLET_RESET.matcher(p)).matches()) {
+            requireMethod(m, "POST");
+            json(ex, 200, walletView(svc.resetWallet(mt.group(1), demoWallet.balance())));
         } else if (p.equals("/api/webhooks/deliveries")) {
             requireMethod(m, "GET");
             json(ex, 200, webhooks.recent());
@@ -174,6 +181,15 @@ public final class Api implements HttpHandler {
         }
         v.put("payable", reason == null);
         v.put("reason", reason);
+        return v;
+    }
+
+    private Map<String, Object> walletView(Wallet w) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        v.put("id", w.id());
+        v.put("owner", w.owner());
+        v.put("balance", w.balance());
+        v.put("locked", w.lockedAt(svc.now()));
         return v;
     }
 
@@ -280,7 +296,8 @@ public final class Api implements HttpHandler {
     static List<String> routes() {
         return List.of("GET /api/health", "GET /api/events", "GET /api/merchants", "GET /api/merchants/{id}/static-qr",
                 "POST /api/invoices", "GET /api/invoices", "GET /api/invoices/{id}", "POST /api/invoices/{id}/cancel",
-                "POST /api/qris/decode", "POST /api/payments", "GET /api/wallets/{id}", "GET /api/webhooks/deliveries",
+                "POST /api/qris/decode", "POST /api/payments", "POST /api/wallets", "GET /api/wallets/{id}",
+                "POST /api/wallets/{id}/reset", "GET /api/webhooks/deliveries",
                 "POST /demo-merchant/webhook", "GET|POST /demo-merchant");
     }
 }

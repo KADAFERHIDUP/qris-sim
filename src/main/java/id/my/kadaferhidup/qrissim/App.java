@@ -30,6 +30,9 @@ import java.util.concurrent.TimeUnit;
 /** Wires the simulator together and starts the HTTP server. */
 public final class App implements AutoCloseable {
 
+    static final String OWNER = "Ahmad Umraithi";
+    static final long DEMO_BALANCE = 500_000;
+
     /** Settings read from environment variables, with demo defaults. */
     public record Config(int port, String demoPin, String webhookSecret) {
 
@@ -64,7 +67,7 @@ public final class App implements AutoCloseable {
                 "9360081200000000017"));
         svc.addMerchant(new Merchant("M002", "Kopi Rakan", "Banda Aceh", "23111", "5814", "ID1026112100002",
                 "9360081200000000025"));
-        svc.addWallet(new Wallet("W001", "Ahmad Umraithi", cfg.demoPin(), 500_000));
+        svc.addWallet(new Wallet("W001", OWNER, cfg.demoPin(), DEMO_BALANCE));
 
         HttpServer server = HttpServer.create(new InetSocketAddress(cfg.port()), 64);
         int port = server.getAddress().getPort();
@@ -101,7 +104,8 @@ public final class App implements AutoCloseable {
         webhooks.watch(a -> hub.publish("webhook", a));
 
         DemoMerchant demo = new DemoMerchant(cfg.webhookSecret(), clock);
-        server.createContext("/", new Api(svc, webhooks, endpoints, demo, hub, new StaticFiles()));
+        server.createContext("/", new Api(svc, webhooks, endpoints, demo, hub, new StaticFiles(),
+                new Api.DemoWallet(OWNER, cfg.demoPin(), DEMO_BALANCE)));
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
 

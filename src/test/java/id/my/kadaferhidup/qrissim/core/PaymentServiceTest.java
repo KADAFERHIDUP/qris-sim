@@ -238,4 +238,45 @@ class PaymentServiceTest {
         assertNotEquals(a.id(), b.id());
         assertTrue(a.id().startsWith("INV261121"));
     }
+
+    @Test
+    void demoWalletsAreSeparate() {
+        Wallet a = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        Wallet b = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        assertNotEquals(a.id(), b.id());
+
+        Invoice.View inv = svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
+        for (String key : new String[] {"x1", "x2", "x3"}) {
+            assertThrows(PaymentException.class, () -> svc.pay(new PayRequest(inv.payload(), null, a.id(), "000000", key)));
+        }
+        assertTrue(a.lockedAt(clock.instant()));
+        // a locked visitor never blocks the next one
+        Payment p = svc.pay(new PayRequest(inv.payload(), null, b.id(), PIN, "y"));
+        assertEquals(b.id(), p.walletId());
+    }
+
+    @Test
+    void resetRefillsAndUnlocks() {
+        Wallet w = svc.createDemoWallet("Ahmad Umraithi", PIN, 20_000);
+        Invoice.View inv = svc.createInvoice("M001", 15_000, null, PaymentService.DEFAULT_TTL);
+        svc.pay(new PayRequest(inv.payload(), null, w.id(), PIN, "k"));
+        for (String key : new String[] {"a", "b", "c"}) {
+            assertThrows(PaymentException.class, () -> svc.pay(new PayRequest(svc.staticQr("M001"), 1_000L, w.id(), "111111", key)));
+        }
+        svc.resetWallet(w.id(), 20_000);
+        assertEquals(20_000, w.balance());
+        assertTrue(!w.lockedAt(clock.instant()));
+    }
+
+    @Test
+    void invoiceStoreStaysBounded() {
+        Invoice.View first = svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
+        svc.cancel(first.id());
+        for (int i = 0; i < PaymentService.MAX_INVOICES; i++) {
+            svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
+        }
+        assertEquals(PaymentService.MAX_INVOICES, svc.invoiceCount());
+        // the closed bill is the one dropped, open ones stay payable
+        assertEquals(PaymentException.Code.NOT_FOUND, codeOf(() -> svc.getInvoice(first.id())));
+    }
 }

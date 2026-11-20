@@ -28,7 +28,9 @@
   };
   const STATUS_STAMP = { PAID: ['LUNAS', 'paid'], EXPIRED: ['KEDALUWARSA', 'expired'], CANCELLED: ['DIBATALKAN', 'cancelled'] };
 
+  const WALLET_KEY = 'qrissim.wallet';
   const state = {
+    walletId: null,
     merchants: [],
     invoice: null,
     payload: null,
@@ -269,11 +271,48 @@
   }
 
   // ---------------------------------------------------------------- phone
-  async function loadWallet() {
-    const w = await api('/api/wallets/W001');
+  // Every visitor gets a wallet of their own, so one person's wrong PIN never locks anyone else.
+  function remember(id) {
+    try { localStorage.setItem(WALLET_KEY, id); } catch (e) { /* private mode: keep it for this tab only */ }
+  }
+
+  async function ensureWallet() {
+    let id = null;
+    try { id = localStorage.getItem(WALLET_KEY); } catch (e) { id = null; }
+    if (id) {
+      try {
+        state.walletId = (await api('/api/wallets/' + encodeURIComponent(id))).id;
+        return;
+      } catch (e) {
+        if (e.code !== 'NOT_FOUND') throw e;
+      }
+    }
+    const w = await api('/api/wallets', { method: 'POST' });
+    state.walletId = w.id;
+    remember(w.id);
+  }
+
+  async function resetWallet() {
+    const btn = $('w-reset');
+    btn.disabled = true;
+    try {
+      paintWallet(await api('/api/wallets/' + state.walletId + '/reset', { method: 'POST' }));
+    } catch (e) {
+      $('home-error').textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function paintWallet(w) {
     $('w-owner').textContent = w.owner;
     $('w-balance').textContent = rupiah(w.balance);
     $('w-lock').hidden = !w.locked;
+  }
+
+  async function loadWallet() {
+    if (!state.walletId) return;
+    paintWallet(await api('/api/wallets/' + state.walletId));
   }
 
   function showView(id) {
@@ -360,7 +399,7 @@
     p.busy = true;
     $('pin-error').textContent = 'Memproses…';
     try {
-      const body = { payload: p.payload, wallet_id: 'W001', pin: p.pin };
+      const body = { payload: p.payload, wallet_id: state.walletId, pin: p.pin };
       if (!p.qr.dynamic) body.amount = p.amount;
       const pay = await api('/api/payments', { method: 'POST', body, key: p.key });
       $('d-amount').textContent = rupiah(pay.amount);
@@ -510,6 +549,7 @@
     document.querySelectorAll('[data-k]').forEach((b) => b.addEventListener('click', () => pinKey(b.dataset.k)));
     $('v-pin').querySelector('[data-del]').addEventListener('click', () => pinKey('del'));
     $('fail-next').addEventListener('click', failNext);
+    $('w-reset').addEventListener('click', resetWallet);
     document.addEventListener('keydown', (e) => {
       if ($('v-pin').hidden || e.target.closest('input, textarea, select')) return;
       if (/^\d$/.test(e.key)) pinKey(e.key);
@@ -521,6 +561,7 @@
     wire();
     connect();
     try {
+      await ensureWallet();
       await Promise.all([loadMerchants(), loadWallet(), loadLogs()]);
     } catch (e) {
       $('bill-error').textContent = e.message;
