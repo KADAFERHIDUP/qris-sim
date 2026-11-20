@@ -1,0 +1,241 @@
+package id.my.kadaferhidup.qrissim.core;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import id.my.kadaferhidup.qrissim.core.PaymentService.PayRequest;
+import id.my.kadaferhidup.qrissim.qris.Crc16;
+import id.my.kadaferhidup.qrissim.qris.Merchant;
+import id.my.kadaferhidup.qrissim.qris.QrisPayload;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class PaymentServiceTest {
+
+    static final Merchant WARUNG = new Merchant("M001", "Warung Ahmad", "Lhokseumawe", "24351", "5499",
+            "ID1026112100001", "9360081200000000017");
+    static final String PIN = "123456";
+
+    MutableClock clock;
+    PaymentService svc;
+    List<PaymentEvent> events;
+
+    @BeforeEach
+    void setUp() {
+        clock = new MutableClock(Instant.parse("2026-11-20T17:00:00Z"));
+        svc = new PaymentService(clock);
+        svc.addMerchant(WARUNG);
+        svc.addWallet(new Wallet("W001", "Ahmad Umraithi", PIN, 100_000));
+        events = new ArrayList<>();
+        svc.addListener(events::add);
+    }
+
+    PayRequest pay(String payload, String key) {
+        return new PayRequest(payload, null, "W001", PIN, key);
+    }
+
+    PaymentException.Code codeOf(Runnable r) {
+        return assertThrows(PaymentException.class, r::run).code();
+    }
+
+    @Test
+    void createdInvoiceCarriesItsIdInTheQr() {
+        Invoice.View inv = svc.createInvoice("M001", 25_000, "Nasi + teh", PaymentService.DEFAULT_TTL);
+        QrisPayload qr = QrisPayload.parse(inv.payload());
+        assertEquals(InvoiceStatus.PENDING, inv.status());
+        assertEquals(inv.id(), qr.billNumber().orElseThrow());
+        assertEquals(25_000L, (long) qr.amount().orElseThrow());
+        assertEquals(clock.instant().plus(Duration.ofMinutes(15)), inv.expiresAt());
+        assertEquals(PaymentEvent.Type.INVOICE_CREATED, events.get(0).type());
+    }
+
+    @Test
+    void payingMovesMoneyAndClosesTheBill() {
+        Invoice.View inv = svc.createInvoice("M001", 25_000, null, PaymentService.DEFAULT_TTL);
+        Payment p = svc.pay(pay(inv.payload(), "k1"));
+
+        assertEquals(75_000, svc.wallet("W001").balance());
+        assertEquals(25_000, svc.merchantBalance("M001"));
+        assertEquals(12, p.rrn().length());
+        Invoice.View after = svc.getInvoice(inv.id());
+        assertEquals(InvoiceStatus.PAID, after.status());
+        assertEquals(p.id(), after.paymentId());
+        assertEquals("Ahmad Umraithi", after.payerName());
+        assertEquals(PaymentEvent.Type.INVOICE_PAID, events.get(events.size() - 1).type());
+    }
+
+    @Test
+    void sameIdempotencyKeyReturnsTheSamePaymentOnce() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        Payment first = svc.pay(pay(inv.payload(), "retry-me"));
+        Payment again = svc.pay(pay(inv.payload(), "retry-me"));
+
+        assertSame(first, again);
+        assertEquals(90_000, svc.wallet("W001").balance(), "didebit sekali saja");
+    }
+
+    @Test
+    void reusedKeyForAnotherPaymentIsRefused() {
+        Invoice.View a = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        Invoice.View b = svc.createInvoice("M001", 20_000, null, PaymentService.DEFAULT_TTL);
+        svc.pay(pay(a.payload(), "k"));
+        assertEquals(PaymentException.Code.IDEMPOTENCY_CONFLICT, codeOf(() -> svc.pay(pay(b.payload(), "k"))));
+    }
+
+    @Test
+    void paidBillCannotBePaidAgain() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        svc.pay(pay(inv.payload(), "k1"));
+        assertEquals(PaymentException.Code.ALREADY_PAID, codeOf(() -> svc.pay(pay(inv.payload(), "k2"))));
+        assertEquals(90_000, svc.wallet("W001").balance());
+    }
+
+    @Test
+    void billExpiresAfterItsDeadline() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, Duration.ofMinutes(15));
+        clock.advance(Duration.ofMinutes(15));
+        assertEquals(PaymentException.Code.EXPIRED, codeOf(() -> svc.pay(pay(inv.payload(), "k1"))));
+        assertEquals(InvoiceStatus.EXPIRED, svc.getInvoice(inv.id()).status());
+        assertEquals(100_000, svc.wallet("W001").balance());
+    }
+
+    @Test
+    void sweepExpiresOnlyOverdueBills() {
+        svc.createInvoice("M001", 1_000, null, Duration.ofMinutes(1));
+        svc.createInvoice("M001", 2_000, null, Duration.ofMinutes(30));
+        clock.advance(Duration.ofMinutes(2));
+        assertEquals(1, svc.expireDue());
+        assertEquals(0, svc.expireDue());
+        assertEquals(PaymentEvent.Type.INVOICE_EXPIRED, events.get(events.size() - 1).type());
+    }
+
+    @Test
+    void cancelledBillCannotBePaid() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        svc.cancel(inv.id());
+        assertEquals(PaymentException.Code.CANCELLED, codeOf(() -> svc.pay(pay(inv.payload(), "k1"))));
+    }
+
+    @Test
+    void threeWrongPinsLockTheWallet() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        PayRequest wrong = new PayRequest(inv.payload(), null, "W001", "000000", "x");
+        assertEquals(PaymentException.Code.WRONG_PIN, codeOf(() -> svc.pay(wrong)));
+        assertEquals(PaymentException.Code.WRONG_PIN, codeOf(() -> svc.pay(wrong)));
+        assertEquals(PaymentException.Code.PIN_LOCKED, codeOf(() -> svc.pay(wrong)));
+        // even the right PIN is refused while locked
+        assertEquals(PaymentException.Code.PIN_LOCKED, codeOf(() -> svc.pay(pay(inv.payload(), "y"))));
+
+        clock.advance(Wallet.LOCK_DURATION);
+        Payment p = svc.pay(pay(inv.payload(), "z"));
+        assertEquals(10_000, p.amount());
+    }
+
+    @Test
+    void insufficientFundsLeavesTheBillOpen() {
+        Invoice.View inv = svc.createInvoice("M001", 150_000, null, PaymentService.DEFAULT_TTL);
+        assertEquals(PaymentException.Code.INSUFFICIENT_FUNDS, codeOf(() -> svc.pay(pay(inv.payload(), "k1"))));
+        assertEquals(InvoiceStatus.PENDING, svc.getInvoice(inv.id()).status());
+        assertEquals(0, svc.merchantBalance("M001"));
+    }
+
+    @Test
+    void staticQrNeedsTheAmountFromThePayer() {
+        String qr = svc.staticQr("M001");
+        assertEquals(PaymentException.Code.INVALID_REQUEST, codeOf(() -> svc.pay(pay(qr, "k1"))));
+
+        Payment p = svc.pay(new PayRequest(qr, 7_500L, "W001", PIN, "k2"));
+        assertNull(p.invoiceId());
+        assertEquals(7_500, svc.merchantBalance("M001"));
+        assertEquals(PaymentEvent.Type.STATIC_PAYMENT, events.get(events.size() - 1).type());
+    }
+
+    @Test
+    void dynamicAmountCannotBeOverridden() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        PayRequest cheaper = new PayRequest(inv.payload(), 1_000L, "W001", PIN, "k1");
+        assertEquals(PaymentException.Code.AMOUNT_MISMATCH, codeOf(() -> svc.pay(cheaper)));
+    }
+
+    @Test
+    void amountsOutsideTheQrisLimitAreRefused() {
+        assertEquals(PaymentException.Code.AMOUNT_OUT_OF_RANGE,
+                codeOf(() -> svc.createInvoice("M001", 10_000_001, null, PaymentService.DEFAULT_TTL)));
+        assertEquals(PaymentException.Code.AMOUNT_OUT_OF_RANGE,
+                codeOf(() -> svc.createInvoice("M001", 0, null, PaymentService.DEFAULT_TTL)));
+    }
+
+    @Test
+    void qrFromAnotherIssuerIsRefused() {
+        String body = "000201" + "010211" + "2633" + "0014ID.CO.QRIS.WWW" + "0204M001" + "0303UMI" + "5303360" + "5802ID"
+                + "5906Toko A" + "6005Medan" + "6304";
+        String foreign = body + Crc16.hex(body);
+        assertEquals(PaymentException.Code.UNKNOWN_ISSUER, codeOf(() -> svc.inspect(foreign)));
+    }
+
+    @Test
+    void brokenQrIsReportedAsInvalid() {
+        assertEquals(PaymentException.Code.INVALID_QR, codeOf(() -> svc.inspect("bukan qris")));
+    }
+
+    @Test
+    void missingIdempotencyKeyIsRefused() {
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        assertEquals(PaymentException.Code.INVALID_REQUEST, codeOf(() -> svc.pay(pay(inv.payload(), " "))));
+    }
+
+    @Test
+    void racingPayersSettleTheBillExactlyOnce() throws Exception {
+        svc.addWallet(new Wallet("W002", "Ahmad Umraithi", PIN, 1_000_000));
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        int threads = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger ok = new AtomicInteger();
+        AtomicInteger alreadyPaid = new AtomicInteger();
+        for (int i = 0; i < threads; i++) {
+            String key = "race-" + i;
+            String wallet = i % 2 == 0 ? "W001" : "W002";
+            pool.submit(() -> {
+                start.await();
+                try {
+                    svc.pay(new PayRequest(inv.payload(), null, wallet, PIN, key));
+                    ok.incrementAndGet();
+                } catch (PaymentException e) {
+                    if (e.code() == PaymentException.Code.ALREADY_PAID) {
+                        alreadyPaid.incrementAndGet();
+                    }
+                }
+                return null;
+            });
+        }
+        start.countDown();
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+        assertEquals(1, ok.get());
+        assertEquals(threads - 1, alreadyPaid.get());
+        assertEquals(10_000, svc.merchantBalance("M001"));
+        assertEquals(1_090_000, svc.wallet("W001").balance() + svc.wallet("W002").balance());
+    }
+
+    @Test
+    void invoiceIdsAreUnique() {
+        Invoice.View a = svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
+        Invoice.View b = svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
+        assertNotEquals(a.id(), b.id());
+        assertTrue(a.id().startsWith("INV261121"));
+    }
+}
