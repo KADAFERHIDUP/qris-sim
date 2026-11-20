@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qris-sim — simulator pembayaran QRIS</title>
+  <meta name="description" content="Simulator pembayaran QRIS: payload EMVCo, tagihan berbatas waktu, PIN, dan webhook bertanda tangan HMAC.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/vendor/qrcode.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#kasir">Lewati ke kasir</a>
+
+  <header class="top">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="2" y="2" width="12" height="12" rx="2"/><rect x="18" y="2" width="12" height="12" rx="2"/>
+        <rect x="2" y="18" width="12" height="12" rx="2"/><rect x="18" y="18" width="5" height="5"/><rect x="25" y="25" width="5" height="5"/>
+        <rect x="6" y="6" width="4" height="4" class="hole"/><rect x="22" y="6" width="4" height="4" class="hole"/><rect x="6" y="22" width="4" height="4" class="hole"/>
+      </svg>
+      <span class="brand-name">qris-sim</span>
+    </div>
+    <p class="lede">Buat tagihan di kasir, bayar dari HP, lalu lihat webhook sampai ke server merchant.</p>
+    <p class="live" id="live" role="status"><span class="dot" aria-hidden="true"></span><span id="live-text">Menghubungkan…</span></p>
+  </header>
+
+  <main class="counter">
+    <!-- ============ Kasir -->
+    <section class="till" id="kasir" aria-labelledby="kasir-h">
+      <h2 id="kasir-h" class="zone-title">Kasir</h2>
+      <form id="bill-form" class="bill-form" novalidate>
+        <div class="field">
+          <label for="merchant">Merchant</label>
+          <select id="merchant" name="merchant"></select>
+        </div>
+        <div class="field">
+          <label for="amount">Nominal</label>
+          <div class="money">
+            <span aria-hidden="true">Rp</span>
+            <input id="amount" name="amount" inputmode="numeric" autocomplete="off" value="25.000" aria-describedby="amount-help">
+          </div>
+          <div class="quick" role="group" aria-label="Nominal cepat">
+            <button type="button" data-amount="10000">10.000</button>
+            <button type="button" data-amount="25000">25.000</button>
+            <button type="button" data-amount="50000">50.000</button>
+            <button type="button" data-amount="125000">125.000</button>
+          </div>
+          <p id="amount-help" class="help">Maksimal Rp10.000.000 per transaksi.</p>
+        </div>
+        <div class="row">
+          <div class="field grow">
+            <label for="note">Catatan</label>
+            <input id="note" name="note" maxlength="60" placeholder="Mie Aceh + teh tarik">
+          </div>
+          <div class="field">
+            <label for="ttl">Berlaku</label>
+            <select id="ttl" name="ttl">
+              <option value="60">1 menit</option>
+              <option value="300">5 menit</option>
+              <option value="900" selected>15 menit</option>
+            </select>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="static"> QR statis (pembeli isi nominal sendiri)</label>
+        <p class="form-error" id="bill-error" role="alert"></p>
+        <button class="btn btn-ink" type="submit" id="print">Cetak QR</button>
+      </form>
+
+      <div class="printer" aria-live="polite">
+        <div class="slot" aria-hidden="true"></div>
+        <div class="paper-clip">
+          <article class="paper" id="receipt" hidden>
+            <header class="r-head">
+              <strong id="r-merchant">—</strong>
+              <span id="r-city">—</span>
+            </header>
+            <dl class="r-meta">
+              <div><dt>No. tagihan</dt><dd id="r-id">—</dd></div>
+              <div><dt>Catatan</dt><dd id="r-note">—</dd></div>
+            </dl>
+            <div class="r-qr" id="r-qr" role="img" aria-label="Kode QR tagihan"></div>
+            <p class="r-amount" id="r-amount">—</p>
+            <p class="r-timer" id="r-timer"></p>
+            <p class="stamp" id="r-stamp" hidden></p>
+            <div class="r-actions">
+              <button type="button" class="btn btn-line btn-sm" id="copy">Salin payload</button>
+              <button type="button" class="btn btn-line btn-sm" id="cancel">Batalkan</button>
+            </div>
+          </article>
+          <p class="paper-empty" id="receipt-empty">Struk QR muncul di sini.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ HP pembayar -->
+    <section class="payer" aria-labelledby="hp-h">
+      <h2 id="hp-h" class="zone-title">HP pembayar</h2>
+      <div class="phone">
+        <div class="screen">
+          <div class="wallet" id="wallet">
+            <span class="w-owner" id="w-owner">—</span>
+            <span class="w-label">Saldo</span>
+            <strong class="w-balance" id="w-balance">—</strong>
+            <span class="w-lock" id="w-lock" hidden>PIN terkunci</span>
+          </div>
+
+          <div class="view" id="v-home">
+            <button type="button" class="btn btn-cobalt btn-block" id="scan" disabled>Pindai QR di kasir</button>
+            <p class="or">atau tempel payload</p>
+            <label class="sr" for="paste">Payload QRIS</label>
+            <textarea id="paste" rows="3" spellcheck="false" placeholder="000201010212…"></textarea>
+            <button type="button" class="btn btn-line btn-block" id="read">Baca payload</button>
+            <p class="form-error" id="home-error" role="alert"></p>
+          </div>
+
+          <div class="view" id="v-confirm" hidden>
+            <p class="v-kicker">Bayar ke</p>
+            <h3 class="v-title" id="c-merchant">—</h3>
+            <p class="v-sub" id="c-city">—</p>
+            <dl class="c-meta">
+              <div><dt>NMID</dt><dd id="c-nmid">—</dd></div>
+              <div><dt>Tagihan</dt><dd id="c-bill">—</dd></div>
+            </dl>
+            <div class="c-amount" id="c-amount-fixed">—</div>
+            <div class="field" id="c-amount-edit" hidden>
+              <label for="c-amount-input">Nominal yang dibayar</label>
+              <div class="money"><span aria-hidden="true">Rp</span><input id="c-amount-input" inputmode="numeric" autocomplete="off"></div>
+            </div>
+            <p class="form-error" id="confirm-error" role="alert"></p>
+            <button type="button" class="btn btn-cobalt btn-block" id="to-pin">Lanjut</button>
+            <button type="button" class="btn btn-ghost btn-block" data-back>Batal</button>
+          </div>
+
+          <div class="view" id="v-pin" hidden>
+            <p class="v-kicker">Masukkan PIN</p>
+            <p class="v-sub" id="p-amount">—</p>
+            <div class="pin-dots" id="pin-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <p class="sr" id="pin-count" aria-live="polite"></p>
+            <p class="form-error center" id="pin-error" role="alert"></p>
+            <div class="keypad" role="group" aria-label="Papan PIN">
+              <button type="button" data-k="1">1</button><button type="button" data-k="2">2</button><button type="button" data-k="3">3</button>
+              <button type="button" data-k="4">4</button><button type="button" data-k="5">5</button><button type="button" data-k="6">6</button>
+              <button type="button" data-k="7">7</button><button type="button" data-k="8">8</button><button type="button" data-k="9">9</button>
+              <button type="button" data-back class="k-text">Batal</button><button type="button" data-k="0">0</button>
+              <button type="button" data-del class="k-text" aria-label="Hapus satu angka">Hapus</button>
+            </div>
+            <p class="pin-hint">PIN demo: 123456</p>
+          </div>
+
+          <div class="view" id="v-done" hidden>
+            <div class="done-mark" aria-hidden="true">
+              <svg viewBox="0 0 48 48"><path d="M14 25l7 7 14-15"/></svg>
+            </div>
+            <h3 class="v-title center">Pembayaran berhasil</h3>
+            <p class="done-amount" id="d-amount">—</p>
+            <dl class="c-meta">
+              <div><dt>Ke</dt><dd id="d-merchant">—</dd></div>
+              <div><dt>No. referensi</dt><dd id="d-rrn">—</dd></div>
+              <div><dt>Waktu</dt><dd id="d-time">—</dd></div>
+            </dl>
+            <button type="button" class="btn btn-cobalt btn-block" data-back>Selesai</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ Webhook -->
+  <section class="wire" aria-labelledby="wire-h">
+    <div class="wire-head">
+      <div>
+        <h2 id="wire-h" class="zone-title">Webhook</h2>
+        <p class="wire-sub">Setiap perubahan tagihan dikirim ke server merchant, ditandatangani HMAC-SHA256. Kalau merchant tidak menjawab 2xx, dikirim ulang setelah 2, 4, 8, 16, lalu 32 detik.</p>
+      </div>
+      <button type="button" class="btn btn-line btn-sm" id="fail-next">Gagalkan 2 kiriman berikutnya</button>
+    </div>
+    <div class="wire-cols">
+      <div>
+        <h3 class="col-title">Dikirim simulator</h3>
+        <ol class="log" id="log-sent"><li class="log-empty">Belum ada kiriman.</li></ol>
+      </div>
+      <div>
+        <h3 class="col-title">Diterima merchant</h3>
+        <ol class="log" id="log-recv"><li class="log-empty">Belum ada yang masuk.</li></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Isi payload -->
+  <section class="anatomy" aria-labelledby="anat-h">
+    <h2 id="anat-h" class="zone-title">Isi payload</h2>
+    <p class="wire-sub">QRIS adalah deretan data object EMVCo: dua digit tag, dua digit panjang, lalu isinya. Empat karakter terakhir adalah CRC16 dari semua yang di depannya.</p>
+    <div class="raw" id="raw" hidden><code id="raw-code"></code></div>
+    <div class="table-box">
+      <table class="tlv" id="tlv">
+        <thead><tr><th scope="col">Tag</th><th scope="col">Panjang</th><th scope="col">Isi</th><th scope="col">Arti</th></tr></thead>
+        <tbody><tr><td colspan="4" class="log-empty">Cetak QR dulu untuk melihat isinya.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>Simulator untuk belajar. Kode QR di sini memakai penerbit <code>ID.QRISSIM.WWW</code>, jadi tidak bisa dibayar dengan aplikasi bank sungguhan.</p>
+    <p><a href="https://github.com/KADAFERHIDUP/qris-sim">Kode sumber</a> · dibuat oleh Ahmad Umraithi</p>
+  </footer>
+</body>
+</html>
