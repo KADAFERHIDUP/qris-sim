@@ -6,6 +6,7 @@ import id.my.kadaferhidup.qrissim.core.Wallet;
 import id.my.kadaferhidup.qrissim.http.Api;
 import id.my.kadaferhidup.qrissim.http.DemoMerchant;
 import id.my.kadaferhidup.qrissim.http.EventHub;
+import id.my.kadaferhidup.qrissim.http.RateLimiter;
 import id.my.kadaferhidup.qrissim.http.StaticFiles;
 import id.my.kadaferhidup.qrissim.json.Json;
 import id.my.kadaferhidup.qrissim.qris.Merchant;
@@ -34,7 +35,7 @@ public final class App implements AutoCloseable {
     static final long DEMO_BALANCE = 500_000;
 
     /** Settings read from environment variables, with demo defaults. */
-    public record Config(int port, String demoPin, String webhookSecret) {
+    public record Config(int port, String demoPin, String webhookSecret, int writesPerMinute) {
 
         public static Config fromEnv() {
             String secret = System.getenv("WEBHOOK_SECRET");
@@ -44,7 +45,8 @@ public final class App implements AutoCloseable {
                 secret = "whsec_" + HexFormat.of().formatHex(b);
             }
             String pin = System.getenv().getOrDefault("DEMO_PIN", "123456");
-            return new Config(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")), pin, secret);
+            int perMinute = Integer.parseInt(System.getenv().getOrDefault("RATE_LIMIT_PER_MINUTE", "60"));
+            return new Config(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")), pin, secret, perMinute);
         }
     }
 
@@ -105,7 +107,8 @@ public final class App implements AutoCloseable {
 
         DemoMerchant demo = new DemoMerchant(cfg.webhookSecret(), clock);
         server.createContext("/", new Api(svc, webhooks, endpoints, demo, hub, new StaticFiles(),
-                new Api.DemoWallet(OWNER, cfg.demoPin(), DEMO_BALANCE)));
+                new Api.DemoWallet(OWNER, cfg.demoPin(), DEMO_BALANCE),
+                new RateLimiter(clock, cfg.writesPerMinute(), Math.max(10, cfg.writesPerMinute() / 2))));
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
 

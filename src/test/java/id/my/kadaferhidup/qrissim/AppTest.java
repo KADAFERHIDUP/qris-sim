@@ -31,7 +31,7 @@ class AppTest {
 
     @BeforeEach
     void start() throws Exception {
-        app = App.start(new App.Config(0, "123456", "whsec_test_secret_123456"));
+        app = App.start(new App.Config(0, "123456", "whsec_test_secret_123456", 60));
         base = "http://127.0.0.1:" + app.port();
         http = HttpClient.newBuilder().proxy(HttpClient.Builder.NO_PROXY).connectTimeout(Duration.ofSeconds(3)).build();
     }
@@ -213,5 +213,27 @@ class AppTest {
 
         Res reset = post("/api/wallets/" + id + "/reset", Map.of(), null);
         assertEquals(500_000L, reset.map().get("balance"));
+    }
+
+    @Test
+    void floodOfWritesIsSlowedDown() throws Exception {
+        int limited = 0;
+        String retryAfter = null;
+        for (int i = 0; i < 45; i++) {
+            HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(base + "/api/qris/decode"))
+                    .header("Content-Type", "application/json").header("X-Forwarded-For", "203.0.113.7")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"payload\":\"x\"}")).build(), HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() == 429) {
+                limited++;
+                retryAfter = r.headers().firstValue("Retry-After").orElse(null);
+            }
+        }
+        assertTrue(limited > 0, "sebagian permintaan harus ditahan");
+        assertTrue(retryAfter != null && Long.parseLong(retryAfter) >= 1);
+        // another visitor is not affected
+        HttpResponse<String> other = http.send(HttpRequest.newBuilder(URI.create(base + "/api/qris/decode"))
+                .header("Content-Type", "application/json").header("X-Forwarded-For", "198.51.100.9")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"payload\":\"x\"}")).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, other.statusCode());
     }
 }
