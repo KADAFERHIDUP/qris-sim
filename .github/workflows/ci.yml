@@ -17,3 +17,27 @@ jobs:
           cache: maven
       - name: Build dan test
         run: mvn -B -ntp verify
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t qris-sim:ci .
+      - name: Jalankan dan tunggu sehat
+        run: |
+          docker run -d --name qris -p 8080:8080 qris-sim:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' qris)
+            echo "health: $status"
+            [ "$status" = "healthy" ] && break
+            sleep 2
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' qris)" = "healthy" ] || { docker logs qris; exit 1; }
+      - name: Uji asap
+        run: |
+          curl -fsS http://localhost:8080/ | grep -q 'qris-sim'
+          curl -fsS http://localhost:8080/app.js > /dev/null
+          inv=$(curl -fsS -H 'Content-Type: application/json' -d '{"merchant_id":"M001","amount":15000}' http://localhost:8080/api/invoices)
+          echo "$inv" | grep -q '"status":"PENDING"'
