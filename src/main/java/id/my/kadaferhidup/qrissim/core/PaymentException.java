@@ -12,6 +12,7 @@ public class PaymentException extends RuntimeException {
         AMOUNT_MISMATCH(400),
         AMOUNT_OUT_OF_RANGE(400),
         WRONG_PIN(401),
+        FORBIDDEN(403),
         PIN_LOCKED(423),
         NOT_FOUND(404),
         ALREADY_PAID(409),

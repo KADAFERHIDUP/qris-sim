@@ -1,8 +1,8 @@
 package id.my.kadaferhidup.qrissim;
 
 import com.sun.net.httpserver.HttpServer;
+import id.my.kadaferhidup.qrissim.core.PaymentEvent;
 import id.my.kadaferhidup.qrissim.core.PaymentService;
-import id.my.kadaferhidup.qrissim.core.Wallet;
 import id.my.kadaferhidup.qrissim.http.Api;
 import id.my.kadaferhidup.qrissim.http.DemoMerchant;
 import id.my.kadaferhidup.qrissim.http.EventHub;
@@ -69,7 +69,6 @@ public final class App implements AutoCloseable {
                 "9360081200000000017"));
         svc.addMerchant(new Merchant("M002", "Kopi Rakan", "Banda Aceh", "23111", "5814", "ID1026112100002",
                 "9360081200000000025"));
-        svc.addWallet(new Wallet("W001", OWNER, cfg.demoPin(), DEMO_BALANCE));
 
         HttpServer server = HttpServer.create(new InetSocketAddress(cfg.port()), 64);
         int port = server.getAddress().getPort();
@@ -96,13 +95,9 @@ public final class App implements AutoCloseable {
 
         EventHub hub = new EventHub();
         svc.addListener(webhooks);
-        svc.addListener(e -> {
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("type", e.type().wireName());
-            data.put("invoice", e.invoice());
-            data.put("payment", e.payment());
-            hub.publish("payment", data);
-        });
+        // The live stream goes to every visitor, so it carries only what a cashier screen needs:
+        // never a wallet id, payer name or QR payload.
+        svc.addListener(e -> hub.publish("payment", publicEvent(e)));
         webhooks.watch(a -> hub.publish("webhook", a));
 
         DemoMerchant demo = new DemoMerchant(cfg.webhookSecret(), clock);
@@ -115,6 +110,26 @@ public final class App implements AutoCloseable {
         timers.scheduleAtFixedRate(svc::expireDue, 1, 1, TimeUnit.SECONDS);
         timers.scheduleAtFixedRate(hub::ping, 15, 15, TimeUnit.SECONDS);
         return new App(server, timers, hub, svc);
+    }
+
+    static Map<String, Object> publicEvent(PaymentEvent e) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("type", e.type().wireName());
+        if (e.invoice() != null) {
+            Map<String, Object> inv = new LinkedHashMap<>();
+            inv.put("id", e.invoice().id());
+            inv.put("status", e.invoice().status());
+            inv.put("amount", e.invoice().amount());
+            data.put("invoice", inv);
+        }
+        if (e.payment() != null) {
+            Map<String, Object> pay = new LinkedHashMap<>();
+            pay.put("invoice_id", e.payment().invoiceId());
+            pay.put("amount", e.payment().amount());
+            pay.put("paid_at", e.payment().paidAt());
+            data.put("payment", pay);
+        }
+        return data;
     }
 
     public int port() {
