@@ -15,12 +15,15 @@ public final class Invoice {
     private final String payload;
     private final Instant createdAt;
     private final Instant expiresAt;
+    private final byte[] cancelTokenHash;
     private InvoiceStatus status = InvoiceStatus.PENDING;
     private Instant closedAt;
     private String paymentId;
     private String payerName;
 
-    Invoice(String id, String merchantId, long amount, String note, String payload, Instant createdAt, Instant expiresAt) {
+    Invoice(String id, String merchantId, long amount, String note, String payload, Instant createdAt, Instant expiresAt,
+            String cancelToken) {
+        this.cancelTokenHash = sha256(cancelToken);
         this.id = id;
         this.merchantId = merchantId;
         this.amount = amount;
@@ -42,6 +45,19 @@ public final class Invoice {
 
     synchronized void markCancelled(Instant at) {
         transition(InvoiceStatus.CANCELLED, at);
+    }
+
+    /** Only whoever created the bill holds this secret, so nobody else can cancel it. */
+    boolean cancelTokenMatches(String token) {
+        return token != null && java.security.MessageDigest.isEqual(cancelTokenHash, sha256(token));
+    }
+
+    private static byte[] sha256(String s) {
+        try {
+            return java.security.MessageDigest.getInstance("SHA-256").digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     synchronized boolean isDue(Instant now) {

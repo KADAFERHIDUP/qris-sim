@@ -23,11 +23,20 @@ public final class Wallet {
     private final String owner;
     private final byte[] salt;
     private final byte[] pinHash;
+    private final byte[] tokenHash;
     private long balance;
     private int failedAttempts;
     private Instant lockedUntil;
 
     public Wallet(String id, String owner, String pin, long balance) {
+        this(id, owner, pin, balance, null);
+    }
+
+    /**
+     * @param token secret the owner must show for every use of the wallet, or null for a wallet
+     *              that only internal code touches. Only its SHA-256 is kept.
+     */
+    public Wallet(String id, String owner, String pin, long balance, String token) {
         if (pin == null || !pin.matches("\\d{6}")) {
             throw new PaymentException(PaymentException.Code.INVALID_REQUEST, "PIN harus 6 angka");
         }
@@ -36,7 +45,24 @@ public final class Wallet {
         this.salt = new byte[16];
         RANDOM.nextBytes(salt);
         this.pinHash = hash(pin, salt);
+        this.tokenHash = token == null ? null : sha256(token);
         this.balance = balance;
+    }
+
+    /** Constant-time check of the owner's secret. A wallet with no secret matches nothing from outside but null. */
+    boolean tokenMatches(String token) {
+        if (tokenHash == null) {
+            return token == null;
+        }
+        return token != null && MessageDigest.isEqual(tokenHash, sha256(token));
+    }
+
+    private static byte[] sha256(String s) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** Checks the PIN, counting failures. Must be called under the service lock. */

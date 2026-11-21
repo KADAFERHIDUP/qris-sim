@@ -58,8 +58,16 @@ public final class PaymentService {
     private record Replay(String fingerprint, Payment payment) {
     }
 
-    /** What the payer's app sends. {@code amount} is read only for a static QR. */
-    public record PayRequest(String payload, Long amount, String walletId, String pin, String idempotencyKey) {
+    /**
+     * What the payer's app sends. {@code amount} is read only for a static QR; {@code walletToken}
+     * is the owner's secret for wallets created with one.
+     */
+    public record PayRequest(String payload, Long amount, String walletId, String pin, String idempotencyKey,
+                             String walletToken) {
+
+        public PayRequest(String payload, Long amount, String walletId, String pin, String idempotencyKey) {
+            this(payload, amount, walletId, pin, idempotencyKey, null);
+        }
 
         String fingerprint() {
             return payload + '|' + amount + '|' + walletId;
@@ -89,32 +97,61 @@ public final class PaymentService {
         }
     }
 
+    /** A new wallet and the secret that proves ownership of it. The secret is shown once and never stored. */
+    public record IssuedWallet(Wallet wallet, String token) {
+    }
+
+    /** A new bill and the secret its creator needs to cancel it. */
+    public record OpenedInvoice(Invoice.View invoice, String cancelToken) {
+    }
+
     /** A fresh wallet for one visitor of the public demo, so nobody shares a balance or a PIN lock. */
-    public Wallet createDemoWallet(String owner, String pin, long balance) {
+    public IssuedWallet createDemoWallet(String owner, String pin, long balance) {
+        String token = secret();
         synchronized (lock) {
             String id;
             do {
                 id = "W" + randomCode(9);
             } while (wallets.containsKey(id));
-            Wallet w = new Wallet(id, owner, pin, balance);
+            Wallet w = new Wallet(id, owner, pin, balance, token);
             wallets.put(id, w);
+            return new IssuedWallet(w, token);
+        }
+    }
+
+    /** The wallet, only for whoever holds its secret. Anyone else gets "not found", so ids cannot be probed. */
+    public Wallet ownedWallet(String walletId, String token) {
+        synchronized (lock) {
+            Wallet w = wallets.get(walletId);
+            if (w == null || !w.tokenMatches(token)) {
+                throw new PaymentException(PaymentException.Code.NOT_FOUND, "Dompet tidak ditemukan");
+            }
             return w;
         }
     }
 
     /** Tops a wallet back up and clears its PIN lock. */
-    public Wallet resetWallet(String walletId, long balance) {
+    public Wallet resetWallet(String walletId, String token, long balance) {
         synchronized (lock) {
-            Wallet w = wallet(walletId);
+            Wallet w = ownedWallet(walletId, token);
             w.reset(balance);
             return w;
         }
     }
 
+    Wallet resetWallet(String walletId, long balance) {
+        return resetWallet(walletId, null, balance);
+    }
+
     // ------------------------------------------------------------------ merchant side
 
     public Invoice.View createInvoice(String merchantId, long amount, String note, Duration ttl) {
+        return openInvoice(merchantId, amount, note, ttl).invoice();
+    }
+
+    public OpenedInvoice openInvoice(String merchantId, long amount, String note, Duration ttl) {
         checkAmount(amount);
+        String cancelToken = secret();
         if (ttl == null || ttl.isNegative() || ttl.isZero() || ttl.compareTo(Duration.ofHours(24)) > 0) {
             throw new PaymentException(PaymentException.Code.INVALID_REQUEST, "Masa berlaku harus 1 detik sampai 24 jam");
         }
@@ -127,13 +164,14 @@ public final class PaymentService {
                 id = "INV" + DAY.format(now) + randomCode(5);
             } while (invoices.containsKey(id));
             String payload = QrisPayload.build(m, amount, id);
-            Invoice inv = new Invoice(id, m.id(), amount, note == null ? "" : note.strip(), payload, now, now.plus(ttl));
+            Invoice inv = new Invoice(id, m.id(), amount, note == null ? "" : note.strip(), payload, now, now.plus(ttl),
+                    cancelToken);
             invoices.put(id, inv);
             trimInvoices();
             view = inv.view();
         }
         publish(new PaymentEvent(PaymentEvent.Type.INVOICE_CREATED, view, null));
-        return view;
+        return new OpenedInvoice(view, cancelToken);
     }
 
     public String staticQr(String merchantId) {
@@ -142,7 +180,17 @@ public final class PaymentService {
         }
     }
 
-    public Invoice.View cancel(String invoiceId) {
+    /** Cancels a bill for whoever created it. */
+    public Invoice.View cancel(String invoiceId, String cancelToken) {
+        synchronized (lock) {
+            if (!invoice(invoiceId).cancelTokenMatches(cancelToken)) {
+                throw new PaymentException(PaymentException.Code.FORBIDDEN, "Hanya kasir pembuat tagihan yang bisa membatalkannya");
+            }
+        }
+        return cancel(invoiceId);
+    }
+
+    Invoice.View cancel(String invoiceId) {
         Invoice.View view;
         synchronized (lock) {
             Invoice inv = invoice(invoiceId);
@@ -168,15 +216,6 @@ public final class PaymentService {
         return view;
     }
 
-    public List<Invoice.View> recentInvoices(int limit) {
-        synchronized (lock) {
-            return invoices.values().stream()
-                    .map(Invoice::view)
-                    .sorted(Comparator.comparing(Invoice.View::createdAt).reversed())
-                    .limit(limit)
-                    .toList();
-        }
-    }
 
     /** Closes every open bill past its deadline. Run on a timer. */
     public int expireDue() {
@@ -224,7 +263,13 @@ public final class PaymentService {
         Payment payment;
         PaymentEvent event;
         synchronized (lock) {
-            Replay seen = idempotency.get(req.idempotencyKey());
+            Wallet w = wallets.get(req.walletId());
+            if (w == null || !w.tokenMatches(req.walletToken())) {
+                throw new PaymentException(PaymentException.Code.NOT_FOUND, "Dompet tidak ditemukan");
+            }
+            // keys belong to one wallet, so one payer's key can never collide with or reveal another's
+            String scopedKey = w.id() + '\u0000' + req.idempotencyKey();
+            Replay seen = idempotency.get(scopedKey);
             if (seen != null) {
                 if (!seen.fingerprint().equals(req.fingerprint())) {
                     throw new PaymentException(PaymentException.Code.IDEMPOTENCY_CONFLICT,
@@ -235,10 +280,6 @@ public final class PaymentService {
 
             Instant now = clock.instant();
             Merchant m = merchant(qr.merchantId().orElse(""));
-            Wallet w = wallets.get(req.walletId());
-            if (w == null) {
-                throw new PaymentException(PaymentException.Code.NOT_FOUND, "Dompet tidak ditemukan");
-            }
 
             Invoice inv = null;
             long amount;
@@ -273,7 +314,7 @@ public final class PaymentService {
             payment = new Payment(paymentId, rrn(), inv == null ? null : inv.id(), m.id(), m.name(),
                     w.id(), w.owner(), amount, now);
             payments.put(paymentId, payment);
-            idempotency.put(req.idempotencyKey(), new Replay(req.fingerprint(), payment));
+            idempotency.put(scopedKey, new Replay(req.fingerprint(), payment));
             if (inv != null) {
                 inv.markPaid(now, paymentId, w.owner());
                 event = new PaymentEvent(PaymentEvent.Type.INVOICE_PAID, inv.view(), payment);
@@ -285,7 +326,8 @@ public final class PaymentService {
         return payment;
     }
 
-    public Wallet wallet(String walletId) {
+    /** For tests and internal checks only: the API always goes through {@link #ownedWallet}. */
+    Wallet wallet(String walletId) {
         synchronized (lock) {
             return Optional.ofNullable(wallets.get(walletId))
                     .orElseThrow(() -> new PaymentException(PaymentException.Code.NOT_FOUND, "Dompet tidak ditemukan"));
@@ -396,6 +438,13 @@ public final class PaymentService {
             sb.append(ALPHANUM.charAt(RANDOM.nextInt(ALPHANUM.length())));
         }
         return sb.toString();
+    }
+
+    /** 32 random bytes, URL-safe: the owner secrets for wallets and bills. */
+    private static String secret() {
+        byte[] b = new byte[32];
+        RANDOM.nextBytes(b);
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b);
     }
 
     private static String rrn() {

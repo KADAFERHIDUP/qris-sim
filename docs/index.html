@@ -133,6 +133,8 @@
           <div class="guard"><dt>Tombol bayar tertekan dua kali</dt><dd>Header <code>Idempotency-Key</code> wajib. Permintaan ulang mengembalikan pembayaran yang sama.</dd></div>
           <div class="guard"><dt>Dua orang membayar satu tagihan bersamaan</dt><dd>Cek dan perubahan saldo berjalan dalam satu kunci. Diuji dengan 16 pembayar yang berebut sekaligus.</dd></div>
           <div class="guard"><dt>PIN ditebak</dt><dd>PIN disimpan sebagai hash PBKDF2, dan tiga kali salah mengunci dompet selama 5 menit.</dd></div>
+          <div class="guard"><dt>Saldo dompet orang lain dikuras</dt><dd>Setiap dompet punya token acak yang hanya diberikan ke pembuatnya. Tanpa token itu, id dompet saja tidak bisa dipakai melihat saldo atau membayar.</dd></div>
+          <div class="guard"><dt>Data pembayar bocor</dt><dd>Tidak ada daftar semua tagihan, dan siaran langsung hanya membawa id, status, dan nominal. Membatalkan tagihan butuh token milik kasir yang membuatnya.</dd></div>
           <div class="guard"><dt>Webhook palsu atau diputar ulang</dt><dd>HMAC atas waktu dan isi pesan, dibandingkan dengan waktu konstan. Salinan yang lebih tua dari 5 menit ditolak.</dd></div>
           <div class="guard"><dt>Merchant sedang mati</dt><dd>Dikirim ulang setelah 2, 4, 8, 16, dan 32 detik dengan id event yang sama, jadi duplikat bisa dibuang.</dd></div>
           <div class="guard"><dt>Demo publik di-spam</dt><dd>Dompet terpisah untuk setiap pengunjung, memori dibatasi, dan permintaan per IP dibatasi dengan token bucket.</dd></div>
@@ -147,10 +149,14 @@ curl -s <span class="k">https://qris-sim-465d7.containers.snapdeploy.app</span>/
   -H 'Content-Type: application/json' \
   -d '{"merchant_id":"M001","amount":32000,"note":"Mie Aceh"}'
 
-<span class="c"># bayar dengan payload dari jawaban di atas</span>
+<span class="c"># buat dompet demo, simpan id dan token-nya</span>
+curl -s -X POST <span class="k">https://qris-sim-465d7.containers.snapdeploy.app</span>/api/wallets
+
+<span class="c"># bayar dengan payload tagihan dan dompet di atas</span>
 curl -s <span class="k">https://qris-sim-465d7.containers.snapdeploy.app</span>/api/payments \
   -H 'Content-Type: application/json' -H 'Idempotency-Key: bayar-1' \
-  -d '{"payload":"PAYLOAD","wallet_id":"W001","pin":"123456"}'</code></pre>
+  -H 'X-Wallet-Token: WALLET_TOKEN' \
+  -d '{"payload":"PAYLOAD","wallet_id":"WALLET_ID","pin":"123456"}'</code></pre>
         <ul class="stack" aria-label="Teknologi">
           <li>Java 21</li><li>com.sun.net.httpserver</li><li>Server-Sent Events</li><li>HMAC-SHA256</li><li>PBKDF2</li><li>JUnit 5</li><li>Docker</li><li>GitHub Actions</li>
         </ul>

@@ -41,8 +41,12 @@ JDK saja, tanpa framework, supaya tiap bagian protokolnya kelihatan jelas.
 | Webhook palsu atau diputar ulang | HMAC-SHA256 atas `timestamp.body`, dibandingkan dengan waktu konstan, salinan yang lebih dari 5 menit ditolak |
 | Merchant sedang mati | Retry dengan jeda 2, 4, 8, 16, 32 detik; event id tetap sama supaya merchant bisa membuang duplikat |
 | Nominal di luar aturan | Rp1 sampai Rp10.000.000 per transaksi, sesuai batas QRIS |
+| Saldo dompet orang lain dikuras | Setiap dompet punya token acak 256-bit yang hanya diberikan sekali ke pembuatnya, disimpan sebagai hash SHA-256. Saldo, reset, dan bayar wajib membawa header `X-Wallet-Token`; tanpa token yang cocok jawabannya 404, sama dengan dompet yang tidak ada |
+| Tagihan orang lain dibatalkan | Pembuat tagihan menerima `cancel_token` sekali; pembatalan tanpa header `X-Cancel-Token` yang cocok ditolak 403 |
+| Data pembayar bocor | Tidak ada daftar semua tagihan. Status tagihan dan stream SSE publik hanya berisi id, status, dan nominal, tanpa id dompet, nama pembayar, atau payload |
+| Idempotency key dipakai ulang orang lain | Key berlaku per dompet, jadi key milik orang lain tidak bisa membuka atau menimpa pembayarannya |
 | Demo publik dipakai banyak orang | Dompet terpisah per pengunjung; penyimpanan tagihan, pembayaran, dan dompet dibatasi supaya memori tidak terus tumbuh |
-| Banjir permintaan dari satu orang | Token bucket per IP untuk semua POST; kelebihannya dijawab 429 dengan header `Retry-After` |
+| Banjir permintaan dari satu orang | Token bucket per IP untuk semua POST; kelebihannya dijawab 429 dengan header `Retry-After`. IP diambil dari entri terakhir `X-Forwarded-For` (yang ditulis proxy), jadi alamat palsu di depannya tidak memberi kuota baru. Satu IP paling banyak 4 stream SSE |
 
 ## Alur
 
@@ -97,17 +101,17 @@ Semua body JSON. Error selalu berbentuk `{"error": {"code": "...", "message": ".
 
 | Metode | Rute | Keterangan |
 |---|---|---|
-| `POST` | `/api/invoices` | Buat tagihan: `merchant_id`, `amount`, `note`, `ttl_seconds` |
-| `GET` | `/api/invoices/{id}` | Status tagihan |
-| `POST` | `/api/invoices/{id}/cancel` | Batalkan tagihan yang belum dibayar |
+| `POST` | `/api/invoices` | Buat tagihan: `merchant_id`, `amount`, `note`, `ttl_seconds`. Jawaban berisi `cancel_token` (hanya sekali) |
+| `GET` | `/api/invoices/{id}` | Status tagihan (tanpa data pembayar) |
+| `POST` | `/api/invoices/{id}/cancel` | Batalkan tagihan yang belum dibayar, wajib header `X-Cancel-Token` |
 | `GET` | `/api/merchants/{id}/static-qr` | Payload QR statis |
 | `POST` | `/api/qris/decode` | Baca payload, cek apakah bisa dibayar |
-| `POST` | `/api/payments` | Bayar: `payload`, `wallet_id`, `pin`, `amount` (QR statis saja) + header `Idempotency-Key` |
-| `POST` | `/api/wallets` | Buat dompet demo baru (saldo Rp500.000) |
-| `GET` | `/api/wallets/{id}` | Saldo dan status kunci PIN |
-| `POST` | `/api/wallets/{id}/reset` | Isi ulang saldo dan buka kunci PIN |
+| `POST` | `/api/payments` | Bayar: `payload`, `wallet_id`, `pin`, `amount` (QR statis saja) + header `Idempotency-Key` dan `X-Wallet-Token` |
+| `POST` | `/api/wallets` | Buat dompet demo baru (saldo Rp500.000). Jawaban berisi `token` (hanya sekali) |
+| `GET` | `/api/wallets/{id}` | Saldo dan status kunci PIN, wajib header `X-Wallet-Token` |
+| `POST` | `/api/wallets/{id}/reset` | Isi ulang saldo dan buka kunci PIN, wajib header `X-Wallet-Token` |
 | `GET` | `/api/webhooks/deliveries` | 100 percobaan kirim webhook terakhir |
-| `GET` | `/api/events` | Server-Sent Events: `payment` dan `webhook` |
+| `GET` | `/api/events` | Server-Sent Events: `payment` dan `webhook` (hanya id, status, nominal) |
 | `GET`/`POST` | `/demo-merchant` | Status merchant demo; `{"fail_next": 2}` menggagalkan dua kiriman berikutnya |
 
 Contoh:
@@ -117,10 +121,13 @@ Contoh:
 curl -s localhost:8080/api/invoices -H 'Content-Type: application/json' \
   -d '{"merchant_id":"M001","amount":32000,"note":"Mie Aceh"}'
 
-# bayar (ganti PAYLOAD dengan isi kolom payload di atas)
+# buat dompet demo; simpan id dan token dari jawabannya
+curl -s -X POST localhost:8080/api/wallets
+
+# bayar (ganti PAYLOAD, WALLET_ID, dan WALLET_TOKEN dengan isi jawaban di atas)
 curl -s localhost:8080/api/payments -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: 7b1f0c2e-bayar-1' \
-  -d '{"payload":"PAYLOAD","wallet_id":"W001","pin":"123456"}'
+  -H 'Idempotency-Key: 7b1f0c2e-bayar-1' -H 'X-Wallet-Token: WALLET_TOKEN' \
+  -d '{"payload":"PAYLOAD","wallet_id":"WALLET_ID","pin":"123456"}'
 ```
 
 ### Memverifikasi webhook di sisi merchant
@@ -158,9 +165,9 @@ src/main/resources/web/   tampilan (HTML, CSS, JS tanpa framework)
 mvn verify
 ```
 
-72 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
+79 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
 16 pembayar yang berebut satu tagihan, sampai server sungguhan yang dinyalakan di port acak
-untuk menguji alur bayar, retry webhook, dan stream SSE. CI juga membangun image Docker
+untuk menguji alur bayar, retry webhook, stream SSE, dan percobaan menguras dompet orang lain. CI juga membangun image Docker
 dan menunggu sampai container sehat.
 
 ## Lisensi

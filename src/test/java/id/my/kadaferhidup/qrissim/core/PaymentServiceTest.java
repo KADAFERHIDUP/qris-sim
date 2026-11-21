@@ -241,29 +241,74 @@ class PaymentServiceTest {
 
     @Test
     void demoWalletsAreSeparate() {
-        Wallet a = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
-        Wallet b = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
-        assertNotEquals(a.id(), b.id());
+        PaymentService.IssuedWallet a = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        PaymentService.IssuedWallet b = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        assertNotEquals(a.wallet().id(), b.wallet().id());
+        assertNotEquals(a.token(), b.token());
 
         Invoice.View inv = svc.createInvoice("M001", 1_000, null, PaymentService.DEFAULT_TTL);
         for (String key : new String[] {"x1", "x2", "x3"}) {
-            assertThrows(PaymentException.class, () -> svc.pay(new PayRequest(inv.payload(), null, a.id(), "000000", key)));
+            assertThrows(PaymentException.class,
+                    () -> svc.pay(new PayRequest(inv.payload(), null, a.wallet().id(), "000000", key, a.token())));
         }
-        assertTrue(a.lockedAt(clock.instant()));
+        assertTrue(a.wallet().lockedAt(clock.instant()));
         // a locked visitor never blocks the next one
-        Payment p = svc.pay(new PayRequest(inv.payload(), null, b.id(), PIN, "y"));
-        assertEquals(b.id(), p.walletId());
+        Payment p = svc.pay(new PayRequest(inv.payload(), null, b.wallet().id(), PIN, "y", b.token()));
+        assertEquals(b.wallet().id(), p.walletId());
+    }
+
+    @Test
+    void walletNeedsItsOwnersToken() {
+        PaymentService.IssuedWallet a = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        PaymentService.IssuedWallet b = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        Invoice.View inv = svc.createInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        String id = a.wallet().id();
+
+        // knowing the id and the demo PIN is not enough to spend from someone else's wallet
+        assertEquals(PaymentException.Code.NOT_FOUND, codeOf(() -> svc.pay(new PayRequest(inv.payload(), null, id, PIN, "k"))));
+        assertEquals(PaymentException.Code.NOT_FOUND,
+                codeOf(() -> svc.pay(new PayRequest(inv.payload(), null, id, PIN, "k", b.token()))));
+        assertEquals(PaymentException.Code.NOT_FOUND, codeOf(() -> svc.ownedWallet(id, "salah")));
+        assertEquals(PaymentException.Code.NOT_FOUND, codeOf(() -> svc.resetWallet(id, b.token(), 999_999)));
+        assertEquals(50_000, a.wallet().balance());
+
+        svc.pay(new PayRequest(inv.payload(), null, id, PIN, "k", a.token()));
+        assertEquals(40_000, svc.ownedWallet(id, a.token()).balance());
+    }
+
+    @Test
+    void idempotencyKeysBelongToOneWallet() {
+        PaymentService.IssuedWallet a = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        PaymentService.IssuedWallet b = svc.createDemoWallet("Ahmad Umraithi", PIN, 50_000);
+        String qr = svc.staticQr("M001");
+        Payment pa = svc.pay(new PayRequest(qr, 1_000L, a.wallet().id(), PIN, "sama", a.token()));
+        // the same key from another wallet is a separate payment, not a replay or a conflict
+        Payment pb = svc.pay(new PayRequest(qr, 1_000L, b.wallet().id(), PIN, "sama", b.token()));
+        assertNotEquals(pa.id(), pb.id());
+        assertEquals(49_000, b.wallet().balance());
+    }
+
+    @Test
+    void onlyTheCreatorCanCancelABill() {
+        PaymentService.OpenedInvoice opened = svc.openInvoice("M001", 10_000, null, PaymentService.DEFAULT_TTL);
+        String id = opened.invoice().id();
+        assertEquals(PaymentException.Code.FORBIDDEN, codeOf(() -> svc.cancel(id, null)));
+        assertEquals(PaymentException.Code.FORBIDDEN, codeOf(() -> svc.cancel(id, "tebakan")));
+        assertEquals(InvoiceStatus.PENDING, svc.getInvoice(id).status());
+        assertEquals(InvoiceStatus.CANCELLED, svc.cancel(id, opened.cancelToken()).status());
     }
 
     @Test
     void resetRefillsAndUnlocks() {
-        Wallet w = svc.createDemoWallet("Ahmad Umraithi", PIN, 20_000);
+        PaymentService.IssuedWallet issued = svc.createDemoWallet("Ahmad Umraithi", PIN, 20_000);
+        Wallet w = issued.wallet();
         Invoice.View inv = svc.createInvoice("M001", 15_000, null, PaymentService.DEFAULT_TTL);
-        svc.pay(new PayRequest(inv.payload(), null, w.id(), PIN, "k"));
+        svc.pay(new PayRequest(inv.payload(), null, w.id(), PIN, "k", issued.token()));
         for (String key : new String[] {"a", "b", "c"}) {
-            assertThrows(PaymentException.class, () -> svc.pay(new PayRequest(svc.staticQr("M001"), 1_000L, w.id(), "111111", key)));
+            assertThrows(PaymentException.class,
+                    () -> svc.pay(new PayRequest(svc.staticQr("M001"), 1_000L, w.id(), "111111", key, issued.token())));
         }
-        svc.resetWallet(w.id(), 20_000);
+        svc.resetWallet(w.id(), issued.token(), 20_000);
         assertEquals(20_000, w.balance());
         assertTrue(!w.lockedAt(clock.instant()));
     }

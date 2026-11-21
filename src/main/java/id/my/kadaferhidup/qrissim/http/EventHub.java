@@ -16,22 +16,26 @@ import java.util.concurrent.CountDownLatch;
 public final class EventHub {
 
     private static final int MAX_CLIENTS = 200;
+    private static final int MAX_PER_IP = 4;
 
-    private record Client(OutputStream out, CountDownLatch closed) {
+    private record Client(OutputStream out, CountDownLatch closed, String ip) {
     }
 
     private final List<Client> clients = new CopyOnWriteArrayList<>();
 
     /** Holds the request open until the client leaves. */
-    void serve(HttpExchange ex) throws IOException {
+    void serve(HttpExchange ex, String ip) throws IOException {
         if (clients.size() >= MAX_CLIENTS) {
             throw new ApiException(503, "TOO_MANY_STREAMS", "Terlalu banyak koneksi live");
+        }
+        if (clients.stream().filter(c -> c.ip().equals(ip)).count() >= MAX_PER_IP) {
+            throw new ApiException(429, "TOO_MANY_STREAMS", "Terlalu banyak koneksi live dari alamat ini");
         }
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.getResponseHeaders().set("X-Accel-Buffering", "no");
         ex.sendResponseHeaders(200, 0);
-        Client c = new Client(ex.getResponseBody(), new CountDownLatch(1));
+        Client c = new Client(ex.getResponseBody(), new CountDownLatch(1), ip);
         clients.add(c);
         write(c, ": terhubung\n\n");
         try {

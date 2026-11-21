@@ -48,21 +48,43 @@ class AppTest {
         }
     }
 
-    Res get(String path) throws Exception {
-        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(base + path)).GET().build(),
-                HttpResponse.BodyHandlers.ofString());
+    Res get(String path, String... headers) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base + path)).GET();
+        if (headers.length > 0) {
+            b.headers(headers);
+        }
+        HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
         return new Res(r.statusCode(), Json.parse(r.body()));
     }
 
-    Res post(String path, Object body, String idempotencyKey) throws Exception {
+    Res post(String path, Object body, String idempotencyKey, String... headers) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base + path))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(Json.write(body)));
         if (idempotencyKey != null) {
             b.header("Idempotency-Key", idempotencyKey);
         }
+        if (headers.length > 0) {
+            b.headers(headers);
+        }
         HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
         return new Res(r.statusCode(), Json.parse(r.body()));
+    }
+
+    /** A fresh demo wallet: its id and the token that must accompany every use. */
+    record W(String id, String token) {
+        String[] auth() {
+            return new String[] {"X-Wallet-Token", token};
+        }
+    }
+
+    W wallet() throws Exception {
+        Res r = post("/api/wallets", Map.of(), null);
+        return new W((String) r.map().get("id"), (String) r.map().get("token"));
+    }
+
+    Res pay(Object payload, W w, String pin, String key) throws Exception {
+        return post("/api/payments", Map.of("payload", payload, "wallet_id", w.id(), "pin", pin), key, w.auth());
     }
 
     @SuppressWarnings("unchecked")
@@ -88,16 +110,18 @@ class AppTest {
         assertEquals(32_000L, decoded.map().get("amount"));
         assertEquals(Boolean.TRUE, decoded.map().get("payable"));
 
-        Map<String, Object> payBody = Map.of("payload", payload, "wallet_id", "W001", "pin", "123456");
-        Res paid = post("/api/payments", payBody, "key-1");
+        W w = wallet();
+        Res paid = pay(payload, w, "123456", "key-1");
         assertEquals(201, paid.status());
-        Res replay = post("/api/payments", payBody, "key-1");
+        Res replay = pay(payload, w, "123456", "key-1");
         assertEquals(paid.map().get("id"), replay.map().get("id"));
 
-        assertEquals("PAID", get("/api/invoices/" + id).map().get("status"));
-        assertEquals(468_000L, get("/api/wallets/W001").map().get("balance"));
+        Res invoice = get("/api/invoices/" + id);
+        assertEquals("PAID", invoice.map().get("status"));
+        assertFalse(invoice.map().containsKey("payer_name"), "nama pembayar tidak dibuka ke siapa pun yang tahu id tagihan");
+        assertEquals(468_000L, get("/api/wallets/" + w.id(), w.auth()).map().get("balance"));
 
-        Res again = post("/api/payments", payBody, "key-2");
+        Res again = pay(payload, w, "123456", "key-2");
         assertEquals(409, again.status());
         assertEquals("ALREADY_PAID", errorCode(again));
     }
@@ -105,7 +129,7 @@ class AppTest {
     @Test
     void webhookReachesTheDemoMerchantSigned() throws Exception {
         Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 5_000), null);
-        post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", "W001", "pin", "123456"), "k");
+        pay(created.map().get("payload"), wallet(), "123456", "k");
 
         List<?> received = List.of();
         for (int i = 0; i < 50 && received.size() < 2; i++) {
@@ -140,7 +164,7 @@ class AppTest {
     @Test
     void wrongPinIsRejectedWithItsCode() throws Exception {
         Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 5_000), null);
-        Res r = post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", "W001", "pin", "999999"), "k");
+        Res r = pay(created.map().get("payload"), wallet(), "999999", "k");
         assertEquals(401, r.status());
         assertEquals("WRONG_PIN", errorCode(r));
     }
@@ -190,29 +214,85 @@ class AppTest {
             return "closed";
         });
         Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 7_000), null);
-        post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", "W001", "pin", "123456"), "k");
+        W w = wallet();
+        pay(created.map().get("payload"), w, "123456", "k");
         String line = seen.get(5, TimeUnit.SECONDS);
         assertTrue(line.contains("\"status\":\"PAID\""), line);
+        // the stream reaches every visitor, so it must not name the payer's wallet or the QR
+        assertFalse(line.contains(w.id()), line);
+        assertFalse(line.contains("wallet"), line);
+        assertFalse(line.contains("payload"), line);
         stream.body().close();
     }
 
     @Test
     void everyVisitorGetsTheirOwnWallet() throws Exception {
         Res a = post("/api/wallets", Map.of(), null);
-        Res b = post("/api/wallets", Map.of(), null);
         assertEquals(201, a.status());
         assertEquals("Ahmad Umraithi", a.map().get("owner"));
         assertEquals(500_000L, a.map().get("balance"));
-        assertFalse(a.map().get("id").equals(b.map().get("id")));
+        W wa = new W((String) a.map().get("id"), (String) a.map().get("token"));
+        W wb = wallet();
+        assertFalse(wa.id().equals(wb.id()));
 
-        String id = (String) a.map().get("id");
         Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 100_000), null);
-        post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", id, "pin", "123456"), "k");
-        assertEquals(400_000L, get("/api/wallets/" + id).map().get("balance"));
-        assertEquals(500_000L, get("/api/wallets/" + b.map().get("id")).map().get("balance"));
+        pay(created.map().get("payload"), wa, "123456", "k");
+        assertEquals(400_000L, get("/api/wallets/" + wa.id(), wa.auth()).map().get("balance"));
+        assertEquals(500_000L, get("/api/wallets/" + wb.id(), wb.auth()).map().get("balance"));
 
-        Res reset = post("/api/wallets/" + id + "/reset", Map.of(), null);
+        Res reset = post("/api/wallets/" + wa.id() + "/reset", Map.of(), null, wa.auth());
         assertEquals(500_000L, reset.map().get("balance"));
+    }
+
+    @Test
+    void walletIdAloneOpensNothing() throws Exception {
+        W victim = wallet();
+        W attacker = wallet();
+        Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 50_000), null);
+
+        assertEquals(404, get("/api/wallets/" + victim.id()).status());
+        assertEquals(404, get("/api/wallets/" + victim.id(), attacker.auth()).status());
+        assertEquals(404, post("/api/wallets/" + victim.id() + "/reset", Map.of(), null).status());
+        Res stolen = post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", victim.id(),
+                "pin", "123456"), "curi-1", attacker.auth());
+        assertEquals(404, stolen.status());
+        assertEquals(500_000L, get("/api/wallets/" + victim.id(), victim.auth()).map().get("balance"));
+    }
+
+    @Test
+    void onlyTheCashierWhoCreatedABillCanCancelIt() throws Exception {
+        Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 5_000), null);
+        String id = (String) created.map().get("id");
+        String token = (String) created.map().get("cancel_token");
+        assertTrue(token != null && token.length() >= 40);
+
+        assertEquals(403, post("/api/invoices/" + id + "/cancel", Map.of(), null).status());
+        assertEquals(403, post("/api/invoices/" + id + "/cancel", Map.of(), null, "X-Cancel-Token", "tebakan").status());
+        Res ok = post("/api/invoices/" + id + "/cancel", Map.of(), null, "X-Cancel-Token", token);
+        assertEquals(200, ok.status());
+        assertEquals("CANCELLED", ok.map().get("status"));
+        assertFalse(get("/api/invoices/" + id).map().containsKey("cancel_token"));
+    }
+
+    @Test
+    void thereIsNoPublicListOfBills() throws Exception {
+        post("/api/invoices", Map.of("merchant_id", "M001", "amount", 5_000), null);
+        assertEquals(405, get("/api/invoices").status());
+    }
+
+    @Test
+    void forgedForwardedForDoesNotDodgeTheLimit() throws Exception {
+        int limited = 0;
+        for (int i = 0; i < 45; i++) {
+            // a client can write anything before the proxy's own entry; only the last one counts
+            HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(base + "/api/qris/decode"))
+                    .header("Content-Type", "application/json").header("X-Forwarded-For", "10.0.0." + i + ", 203.0.113.50")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"payload\":\"x\"}")).build(), HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() == 429) {
+                limited++;
+            }
+        }
+        assertTrue(limited > 0, "alamat palsu di depan tidak boleh membuat kuota baru");
     }
 
     @Test

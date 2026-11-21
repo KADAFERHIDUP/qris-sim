@@ -98,7 +98,7 @@ public final class Api implements HttpHandler {
             json(ex, 200, Map.of("status", "ok"));
         } else if (p.equals("/api/events")) {
             requireMethod(m, "GET");
-            hub.serve(ex);
+            hub.serve(ex, clientIp(ex));
         } else if (p.equals("/api/merchants")) {
             requireMethod(m, "GET");
             json(ex, 200, svc.merchants().stream().map(this::merchantView).toList());
@@ -106,22 +106,21 @@ public final class Api implements HttpHandler {
             requireMethod(m, "GET");
             json(ex, 200, Map.of("payload", svc.staticQr(mt.group(1))));
         } else if (p.equals("/api/invoices")) {
-            if (m.equals("POST")) {
-                Map<String, Object> b = body(ex);
-                long ttl = optLong(b, "ttl_seconds", PaymentService.DEFAULT_TTL.toSeconds());
-                Invoice.View inv = svc.createInvoice(str(b, "merchant_id"), reqLong(b, "amount"), optStr(b, "note"),
-                        Duration.ofSeconds(ttl));
-                json(ex, 201, inv);
-            } else {
-                requireMethod(m, "GET");
-                json(ex, 200, svc.recentInvoices(20));
-            }
+            // there is deliberately no list of everyone's bills: a bill is visible only by its id
+            requireMethod(m, "POST");
+            Map<String, Object> b = body(ex);
+            long ttl = optLong(b, "ttl_seconds", PaymentService.DEFAULT_TTL.toSeconds());
+            PaymentService.OpenedInvoice opened = svc.openInvoice(str(b, "merchant_id"), reqLong(b, "amount"),
+                    optStr(b, "note"), Duration.ofSeconds(ttl));
+            Map<String, Object> out = Json.parseObject(Json.write(opened.invoice()));
+            out.put("cancel_token", opened.cancelToken());
+            json(ex, 201, out);
         } else if ((mt = INVOICE.matcher(p)).matches()) {
             requireMethod(m, "GET");
-            json(ex, 200, svc.getInvoice(mt.group(1)));
+            json(ex, 200, publicInvoice(svc.getInvoice(mt.group(1))));
         } else if ((mt = CANCEL.matcher(p)).matches()) {
             requireMethod(m, "POST");
-            json(ex, 200, svc.cancel(mt.group(1)));
+            json(ex, 200, publicInvoice(svc.cancel(mt.group(1), ex.getRequestHeaders().getFirst("X-Cancel-Token"))));
         } else if (p.equals("/api/qris/decode")) {
             requireMethod(m, "POST");
             json(ex, 200, decode(str(body(ex), "payload")));
@@ -131,17 +130,20 @@ public final class Api implements HttpHandler {
             String key = ex.getRequestHeaders().getFirst("Idempotency-Key");
             Long amount = b.get("amount") == null ? null : reqLong(b, "amount");
             Payment pay = svc.pay(new PaymentService.PayRequest(str(b, "payload"), amount, str(b, "wallet_id"),
-                    str(b, "pin"), key));
+                    str(b, "pin"), key, walletToken(ex)));
             json(ex, 201, pay);
         } else if (p.equals("/api/wallets")) {
             requireMethod(m, "POST");
-            json(ex, 201, walletView(svc.createDemoWallet(demoWallet.owner(), demoWallet.pin(), demoWallet.balance())));
+            PaymentService.IssuedWallet issued = svc.createDemoWallet(demoWallet.owner(), demoWallet.pin(), demoWallet.balance());
+            Map<String, Object> out = walletView(issued.wallet());
+            out.put("token", issued.token());
+            json(ex, 201, out);
         } else if ((mt = WALLET.matcher(p)).matches()) {
             requireMethod(m, "GET");
-            json(ex, 200, walletView(svc.wallet(mt.group(1))));
+            json(ex, 200, walletView(svc.ownedWallet(mt.group(1), walletToken(ex))));
         } else if ((mt = WALLET_RESET.matcher(p)).matches()) {
             requireMethod(m, "POST");
-            json(ex, 200, walletView(svc.resetWallet(mt.group(1), demoWallet.balance())));
+            json(ex, 200, walletView(svc.resetWallet(mt.group(1), walletToken(ex), demoWallet.balance())));
         } else if (p.equals("/api/webhooks/deliveries")) {
             requireMethod(m, "GET");
             json(ex, 200, webhooks.recent());
@@ -176,18 +178,25 @@ public final class Api implements HttpHandler {
     }
 
     /**
-     * The visitor's address. Behind a hosting proxy every request arrives from the proxy, so the
-     * first X-Forwarded-For entry is used when present.
+     * The visitor's address. Behind a hosting proxy every request arrives from the proxy, which
+     * appends the address it saw to X-Forwarded-For. Only that last entry is trusted: anything
+     * before it was written by the client and could be forged to dodge the rate limit.
      */
     static String clientIp(HttpExchange ex) {
         String xff = ex.getRequestHeaders().getFirst("X-Forwarded-For");
         if (xff != null && !xff.isBlank()) {
-            String first = xff.split(",")[0].strip();
-            if (first.length() <= 45) {
-                return first;
+            String[] parts = xff.split(",");
+            String last = parts[parts.length - 1].strip();
+            if (!last.isEmpty() && last.length() <= 45) {
+                return last;
             }
         }
         return ex.getRemoteAddress().getAddress().getHostAddress();
+    }
+
+    private static String walletToken(HttpExchange ex) {
+        String t = ex.getRequestHeaders().getFirst("X-Wallet-Token");
+        return t == null || t.length() > 100 ? null : t;
     }
 
     private Map<String, Object> decode(String payload) {
@@ -212,6 +221,14 @@ public final class Api implements HttpHandler {
         v.put("payable", reason == null);
         v.put("reason", reason);
         return v;
+    }
+
+    /** A bill as anyone holding its id may see it: no payer name, no payment id. */
+    private static Map<String, Object> publicInvoice(Invoice.View v) {
+        Map<String, Object> out = Json.parseObject(Json.write(v));
+        out.remove("payer_name");
+        out.remove("payment_id");
+        return out;
     }
 
     private Map<String, Object> walletView(Wallet w) {
@@ -325,7 +342,7 @@ public final class Api implements HttpHandler {
     /** Kept for the list of routes in the README. */
     static List<String> routes() {
         return List.of("GET /api/health", "GET /api/events", "GET /api/merchants", "GET /api/merchants/{id}/static-qr",
-                "POST /api/invoices", "GET /api/invoices", "GET /api/invoices/{id}", "POST /api/invoices/{id}/cancel",
+                "POST /api/invoices", "GET /api/invoices/{id}", "POST /api/invoices/{id}/cancel",
                 "POST /api/qris/decode", "POST /api/payments", "POST /api/wallets", "GET /api/wallets/{id}",
                 "POST /api/wallets/{id}/reset", "GET /api/webhooks/deliveries",
                 "POST /demo-merchant/webhook", "GET|POST /demo-merchant");

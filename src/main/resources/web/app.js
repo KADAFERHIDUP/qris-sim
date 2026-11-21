@@ -31,6 +31,8 @@
   const WALLET_KEY = 'qrissim.wallet';
   const state = {
     walletId: null,
+    walletToken: null,
+    cancelToken: null,
     merchants: [],
     invoice: null,
     payload: null,
@@ -46,6 +48,8 @@
       init.body = JSON.stringify(options.body);
     }
     if (options.key) init.headers['Idempotency-Key'] = options.key;
+    if (options.wallet && state.walletToken) init.headers['X-Wallet-Token'] = state.walletToken;
+    if (options.cancel) init.headers['X-Cancel-Token'] = options.cancel;
     let res;
     try {
       res = await fetch(path, init);
@@ -140,6 +144,7 @@
           method: 'POST',
           body: { merchant_id: merchantId, amount, note: note || null, ttl_seconds: Number($('ttl').value) },
         });
+        state.cancelToken = inv.cancel_token;
         showReceipt(inv);
       }
     } catch (e) {
@@ -214,7 +219,7 @@
   async function cancelBill() {
     if (!state.invoice) return;
     try {
-      const inv = await api('/api/invoices/' + state.invoice.id + '/cancel', { method: 'POST' });
+      const inv = await api('/api/invoices/' + state.invoice.id + '/cancel', { method: 'POST', cancel: state.cancelToken });
       closeReceipt(inv.status);
     } catch (e) {
       $('bill-error').textContent = e.message;
@@ -272,16 +277,27 @@
 
   // ---------------------------------------------------------------- phone
   // Every visitor gets a wallet of their own, so one person's wrong PIN never locks anyone else.
-  function remember(id) {
-    try { localStorage.setItem(WALLET_KEY, id); } catch (e) { /* private mode: keep it for this tab only */ }
+  // The wallet's secret token stays in this browser only; the server keeps just its hash.
+  function remember(id, token) {
+    try { localStorage.setItem(WALLET_KEY, JSON.stringify({ id, token })); } catch (e) { /* private mode: this tab only */ }
+  }
+
+  function recall() {
+    try {
+      const v = JSON.parse(localStorage.getItem(WALLET_KEY) || 'null');
+      return v && typeof v.id === 'string' && typeof v.token === 'string' ? v : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   async function ensureWallet() {
-    let id = null;
-    try { id = localStorage.getItem(WALLET_KEY); } catch (e) { id = null; }
-    if (id) {
+    const saved = recall();
+    if (saved) {
+      state.walletId = saved.id;
+      state.walletToken = saved.token;
       try {
-        state.walletId = (await api('/api/wallets/' + encodeURIComponent(id))).id;
+        await api('/api/wallets/' + encodeURIComponent(saved.id), { wallet: true });
         return;
       } catch (e) {
         if (e.code !== 'NOT_FOUND') throw e;
@@ -289,14 +305,15 @@
     }
     const w = await api('/api/wallets', { method: 'POST' });
     state.walletId = w.id;
-    remember(w.id);
+    state.walletToken = w.token;
+    remember(w.id, w.token);
   }
 
   async function resetWallet() {
     const btn = $('w-reset');
     btn.disabled = true;
     try {
-      paintWallet(await api('/api/wallets/' + state.walletId + '/reset', { method: 'POST' }));
+      paintWallet(await api('/api/wallets/' + state.walletId + '/reset', { method: 'POST', wallet: true }));
     } catch (e) {
       $('home-error').textContent = e.message;
     } finally {
@@ -312,7 +329,7 @@
 
   async function loadWallet() {
     if (!state.walletId) return;
-    paintWallet(await api('/api/wallets/' + state.walletId));
+    paintWallet(await api('/api/wallets/' + state.walletId, { wallet: true }));
   }
 
   function showView(id) {
@@ -401,7 +418,7 @@
     try {
       const body = { payload: p.payload, wallet_id: state.walletId, pin: p.pin };
       if (!p.qr.dynamic) body.amount = p.amount;
-      const pay = await api('/api/payments', { method: 'POST', body, key: p.key });
+      const pay = await api('/api/payments', { method: 'POST', body, key: p.key, wallet: true });
       $('d-amount').textContent = rupiah(pay.amount);
       $('d-merchant').textContent = pay.merchant_name;
       $('d-rrn').textContent = pay.rrn;
