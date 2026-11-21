@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qris-sim · Simulator pembayaran QRIS oleh Ahmad Umraithi</title>
+  <meta name="description" content="Simulator pembayaran QRIS dari sisi penyelenggara: payload EMVCo, tagihan berbatas waktu, PIN, dan webhook bertanda tangan HMAC. Ditulis dengan Java 21 tanpa framework.">
+  <meta name="theme-color" content="#E3E6E9">
+  <meta property="og:title" content="qris-sim · Simulator pembayaran QRIS">
+  <meta property="og:description" content="Buat tagihan di kasir, bayar dari HP, lihat webhook bertanda tangan sampai ke merchant.">
+  <meta property="og:image" content="https://qris.kadaferhidup.my.id/tampilan.png">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap">
+  <style>
+    :root {
+      --counter: #E3E6E9; --counter-2: #D5D9DD; --ink: #13181E; --ink-2: #4A535C; --ink-3: #6A737C;
+      --line: #C3C9CF; --paper: #FFFFFF; --cobalt: #2250D9; --cobalt-ink: #163BA8; --cobalt-tint: #E6ECFD;
+      --green: #0D6E38; --green-bg: #DAF2E3;
+      --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body { background: var(--counter); color: var(--ink); font: 400 17px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+    a { color: var(--cobalt-ink); }
+    a:hover { color: var(--ink); }
+    :focus-visible { outline: 3px solid var(--cobalt); outline-offset: 3px; border-radius: 6px; }
+    code { font-family: var(--mono); font-size: .9em; }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 48px); }
+
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 26px 0; flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font: 600 20px var(--mono); letter-spacing: -.02em; }
+    .brand svg { width: 30px; height: 30px; }
+    header nav { display: flex; gap: 22px; font-size: 15px; flex-wrap: wrap; }
+    header nav a { color: var(--ink-2); text-decoration: none; }
+    header nav a:hover { color: var(--ink); }
+
+    .hero { padding: clamp(36px, 7vw, 96px) 0 clamp(32px, 5vw, 56px); max-width: 860px; }
+    .kicker { font: 600 15px var(--mono); color: var(--ink-2); }
+    h1 { margin-top: 18px; font-size: clamp(44px, 7.6vw, 96px); line-height: .96; letter-spacing: -.045em; font-weight: 700; }
+    h1 span { display: block; color: var(--ink-3); }
+    .lede { margin-top: 26px; max-width: 36em; font-size: 19px; color: var(--ink-2); }
+    .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 54px; padding: 0 26px; border-radius: 14px; font-weight: 600; font-size: 17px; text-decoration: none; }
+    .btn-ink { background: var(--ink); color: #fff; }
+    .btn-ink:hover { background: #000; color: #fff; }
+    .btn-line { background: var(--paper); color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--line); }
+    .btn-line:hover { color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--ink-2); }
+    .note { margin-top: 14px; font-size: 14px; color: var(--ink-3); }
+
+    .shot { margin: 8px 0 clamp(56px, 8vw, 104px); border-radius: 24px; overflow: hidden; background: var(--counter-2); box-shadow: 0 30px 60px -30px rgba(19, 24, 30, .45); }
+    .shot img { display: block; width: 100%; height: auto; }
+
+    section { padding-bottom: clamp(56px, 8vw, 104px); }
+    h2 { font-size: clamp(30px, 4.4vw, 48px); line-height: 1.05; letter-spacing: -.035em; font-weight: 700; max-width: 18em; }
+    .sub { margin-top: 14px; max-width: 40em; color: var(--ink-2); }
+
+    .flow { list-style: none; padding: 0; margin-top: 36px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; counter-reset: step; }
+    .flow li { background: var(--paper); border-radius: 20px; padding: 22px; counter-increment: step; }
+    .flow li::before { content: counter(step); display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--ink); color: #fff; font: 600 15px var(--mono); margin-bottom: 16px; }
+    .flow h3 { font-size: 18px; letter-spacing: -.01em; }
+    .flow p { margin-top: 6px; font-size: 15px; color: var(--ink-2); }
+    @media (max-width: 900px) { .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 520px) { .flow { grid-template-columns: minmax(0, 1fr); } }
+
+    .guards { margin-top: 32px; background: var(--paper); border-radius: 22px; overflow: hidden; }
+    .guard { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 8px 32px; padding: 20px 24px; border-top: 1px solid var(--counter); }
+    .guard:first-child { border-top: none; }
+    .guard dt { font-weight: 600; }
+    .guard dd { color: var(--ink-2); }
+    @media (max-width: 720px) { .guard { grid-template-columns: minmax(0, 1fr); } }
+
+    .api { margin-top: 32px; background: var(--ink); color: #E8ECEF; border-radius: 20px; padding: 22px 24px; font: 14px/1.7 var(--mono); overflow-x: auto; }
+    .api .c { color: #98A2AC; }
+    .api .k { color: #9DB7FF; }
+
+    .stack { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; padding: 0; list-style: none; }
+    .stack li { background: var(--paper); border-radius: 999px; padding: 8px 16px; font: 500 15px var(--mono); }
+
+    footer { border-top: 1px solid var(--line); padding: 32px 0 56px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; color: var(--ink-2); font-size: 15px; }
+    footer p + p { margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <a class="brand" href="./">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#13181E"/><g fill="#fff"><rect x="5" y="5" width="9" height="9" rx="1.5"/><rect x="18" y="5" width="9" height="9" rx="1.5"/><rect x="5" y="18" width="9" height="9" rx="1.5"/><rect x="18" y="18" width="4" height="4"/><rect x="23" y="23" width="4" height="4"/></g><g fill="#13181E"><rect x="8" y="8" width="3" height="3"/><rect x="21" y="8" width="3" height="3"/><rect x="8" y="21" width="3" height="3"/></g></svg>
+        qris-sim
+      </a>
+      <nav aria-label="Bagian halaman">
+        <a href="#alur">Alur</a>
+        <a href="#keamanan">Keamanan</a>
+        <a href="#api">API</a>
+        <a href="https://github.com/KADAFERHIDUP/qris-sim">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="hero">
+        <p class="kicker">Proyek portofolio · Java 21</p>
+        <h1>Simulator pembayaran QRIS,<span>dari kasir sampai webhook.</span></h1>
+        <p class="lede">Buat tagihan di kasir, bayar dari HP dengan PIN, lalu lihat notifikasi bertanda tangan HMAC sampai ke server merchant. Semua sisi penyelenggara ditulis dengan Java standar, tanpa framework.</p>
+        <div class="ctas">
+          <a class="btn btn-ink" href="https://qris-sim-465d7.containers.snapdeploy.app">Coba demo langsung</a>
+          <a class="btn btn-line" href="https://github.com/KADAFERHIDUP/qris-sim">Lihat kode sumber</a>
+        </div>
+        <p class="note">Server demo bisa butuh beberapa detik untuk bangun saat pertama dibuka. PIN demo: <code>123456</code>.</p>
+      </div>
+
+      <figure class="shot">
+        <img src="tampilan.png" width="1280" height="1180" alt="Layar qris-sim: struk kasir bercap LUNAS, HP pembayar menampilkan pembayaran berhasil, dan log webhook yang diterima merchant dengan tanda tangan sah.">
+      </figure>
+
+      <section id="alur" aria-labelledby="alur-h">
+        <h2 id="alur-h">Satu pembayaran, empat langkah</h2>
+        <p class="sub">Setiap langkah di bawah bisa kamu jalankan sendiri di demo, dan semuanya terlihat dalam satu layar.</p>
+        <ol class="flow">
+          <li><h3>Kasir mencetak QR</h3><p>Payload EMVCo dengan nominal, nomor tagihan, dan CRC16. Berlaku 1 sampai 15 menit.</p></li>
+          <li><h3>HP memindai</h3><p>Payload dibaca, CRC dicek, merchant dan nominal ditampilkan sebelum bayar.</p></li>
+          <li><h3>Bayar dengan PIN</h3><p>Saldo dipotong sekali saja berkat Idempotency-Key, lalu struk kasir berubah LUNAS saat itu juga.</p></li>
+          <li><h3>Merchant diberi tahu</h3><p>Webhook ditandatangani HMAC-SHA256 dan dikirim ulang kalau merchant tidak menjawab.</p></li>
+        </ol>
+      </section>
+
+      <section id="keamanan" aria-labelledby="keamanan-h">
+        <h2 id="keamanan-h">Yang dijaga, dan caranya</h2>
+        <dl class="guards">
+          <div class="guard"><dt>QR diubah nominalnya</dt><dd>CRC di tag 63 dicek, dan nominal QR dinamis dicocokkan lagi dengan tagihan di server.</dd></div>
+          <div class="guard"><dt>Tombol bayar tertekan dua kali</dt><dd>Header <code>Idempotency-Key</code> wajib. Permintaan ulang mengembalikan pembayaran yang sama.</dd></div>
+          <div class="guard"><dt>Dua orang membayar satu tagihan bersamaan</dt><dd>Cek dan perubahan saldo berjalan dalam satu kunci. Diuji dengan 16 pembayar yang berebut sekaligus.</dd></div>
+          <div class="guard"><dt>PIN ditebak</dt><dd>PIN disimpan sebagai hash PBKDF2, dan tiga kali salah mengunci dompet selama 5 menit.</dd></div>
+          <div class="guard"><dt>Webhook palsu atau diputar ulang</dt><dd>HMAC atas waktu dan isi pesan, dibandingkan dengan waktu konstan. Salinan yang lebih tua dari 5 menit ditolak.</dd></div>
+          <div class="guard"><dt>Merchant sedang mati</dt><dd>Dikirim ulang setelah 2, 4, 8, 16, dan 32 detik dengan id event yang sama, jadi duplikat bisa dibuang.</dd></div>
+          <div class="guard"><dt>Demo publik di-spam</dt><dd>Dompet terpisah untuk setiap pengunjung, memori dibatasi, dan permintaan per IP dibatasi dengan token bucket.</dd></div>
+        </dl>
+      </section>
+
+      <section id="api" aria-labelledby="api-h">
+        <h2 id="api-h">Bisa dipakai lewat API juga</h2>
+        <p class="sub">Semua yang ada di layar demo tersedia sebagai REST API berformat JSON. Daftar lengkapnya ada di README.</p>
+<pre class="api"><code><span class="c"># buat tagihan Rp32.000</span>
+curl -s <span class="k">https://qris-sim-465d7.containers.snapdeploy.app</span>/api/invoices \
+  -H 'Content-Type: application/json' \
+  -d '{"merchant_id":"M001","amount":32000,"note":"Mie Aceh"}'
+
+<span class="c"># bayar dengan payload dari jawaban di atas</span>
+curl -s <span class="k">https://qris-sim-465d7.containers.snapdeploy.app</span>/api/payments \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: bayar-1' \
+  -d '{"payload":"PAYLOAD","wallet_id":"W001","pin":"123456"}'</code></pre>
+        <ul class="stack" aria-label="Teknologi">
+          <li>Java 21</li><li>com.sun.net.httpserver</li><li>Server-Sent Events</li><li>HMAC-SHA256</li><li>PBKDF2</li><li>JUnit 5</li><li>Docker</li><li>GitHub Actions</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <div>
+        <p><strong>Ahmad Umraithi</strong>, Teknik Informatika Universitas Malikussaleh</p>
+        <p>Proyek lain: <a href="https://minibank.kadaferhidup.my.id">MiniBank</a>, core banking mini dengan Spring Boot.</p>
+      </div>
+      <div>
+        <p><a href="https://www.linkedin.com/in/ahmadumraithi/">LinkedIn</a> · <a href="https://github.com/KADAFERHIDUP">GitHub</a></p>
+        <p>Simulator untuk belajar, bukan sistem pembayaran sungguhan.</p>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
