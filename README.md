@@ -4,6 +4,8 @@
 ![Java 21](https://img.shields.io/badge/Java-21-13181E)
 ![Tanpa dependency runtime](https://img.shields.io/badge/dependency%20runtime-0-2250D9)
 
+**Demo langsung:** <https://qris-sim-465d7.containers.snapdeploy.app> · **Halaman proyek:** <https://qris.kadaferhidup.my.id>
+
 Simulator pembayaran QRIS dari sisi penyelenggara: membuat dan membaca payload EMVCo,
 mengelola tagihan berbatas waktu, memproses pembayaran ber-PIN, lalu memberi tahu merchant
 lewat webhook bertanda tangan HMAC.
@@ -62,6 +64,9 @@ sequenceDiagram
 ```
 
 ## Menjalankan
+
+Versi online berjalan di SnapDeploy dari `Dockerfile` di repo ini. Halaman proyek di
+`docs/` disajikan GitHub Pages dengan domain `qris.kadaferhidup.my.id` (file `docs/CNAME`).
 
 Dengan Docker:
 
