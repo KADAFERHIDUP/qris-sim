@@ -195,4 +195,23 @@ class AppTest {
         assertTrue(line.contains("\"status\":\"PAID\""), line);
         stream.body().close();
     }
+
+    @Test
+    void everyVisitorGetsTheirOwnWallet() throws Exception {
+        Res a = post("/api/wallets", Map.of(), null);
+        Res b = post("/api/wallets", Map.of(), null);
+        assertEquals(201, a.status());
+        assertEquals("Ahmad Umraithi", a.map().get("owner"));
+        assertEquals(500_000L, a.map().get("balance"));
+        assertFalse(a.map().get("id").equals(b.map().get("id")));
+
+        String id = (String) a.map().get("id");
+        Res created = post("/api/invoices", Map.of("merchant_id", "M001", "amount", 100_000), null);
+        post("/api/payments", Map.of("payload", created.map().get("payload"), "wallet_id", id, "pin", "123456"), "k");
+        assertEquals(400_000L, get("/api/wallets/" + id).map().get("balance"));
+        assertEquals(500_000L, get("/api/wallets/" + b.map().get("id")).map().get("balance"));
+
+        Res reset = post("/api/wallets/" + id + "/reset", Map.of(), null);
+        assertEquals(500_000L, reset.map().get("balance"));
+    }
 }

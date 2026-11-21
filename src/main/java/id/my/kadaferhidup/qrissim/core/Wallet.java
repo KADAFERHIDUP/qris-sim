@@ -63,6 +63,12 @@ public final class Wallet {
         throw new PaymentException(PaymentException.Code.WRONG_PIN, "PIN salah. Sisa " + left + " percobaan");
     }
 
+    void reset(long newBalance) {
+        balance = newBalance;
+        failedAttempts = 0;
+        lockedUntil = null;
+    }
+
     void debit(long amount) {
         if (amount > balance) {
             throw new PaymentException(PaymentException.Code.INSUFFICIENT_FUNDS, "Saldo tidak cukup");

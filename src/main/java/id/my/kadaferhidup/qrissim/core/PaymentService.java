@@ -33,6 +33,14 @@ public final class PaymentService {
     public static final long MAX_AMOUNT = 10_000_000L;
     public static final Duration DEFAULT_TTL = Duration.ofMinutes(15);
 
+    /*
+     * Limits that keep a public demo from growing without end. When a map is full the
+     * oldest entry goes; for bills, the oldest closed one goes first.
+     */
+    static final int MAX_WALLETS = 5_000;
+    static final int MAX_INVOICES = 5_000;
+    static final int MAX_PAYMENTS = 10_000;
+
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHANUM = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyMMdd").withZone(ZoneId.of("Asia/Jakarta"));
@@ -41,10 +49,10 @@ public final class PaymentService {
     private final Object lock = new Object();
     private final Map<String, Merchant> merchants = new LinkedHashMap<>();
     private final Map<String, Long> merchantBalances = new HashMap<>();
-    private final Map<String, Wallet> wallets = new LinkedHashMap<>();
+    private final Map<String, Wallet> wallets = bounded(MAX_WALLETS);
     private final Map<String, Invoice> invoices = new LinkedHashMap<>();
-    private final Map<String, Payment> payments = new LinkedHashMap<>();
-    private final Map<String, Replay> idempotency = new HashMap<>();
+    private final Map<String, Payment> payments = bounded(MAX_PAYMENTS);
+    private final Map<String, Replay> idempotency = bounded(MAX_PAYMENTS);
     private final List<Consumer<PaymentEvent>> listeners = new CopyOnWriteArrayList<>();
 
     private record Replay(String fingerprint, Payment payment) {
@@ -81,6 +89,28 @@ public final class PaymentService {
         }
     }
 
+    /** A fresh wallet for one visitor of the public demo, so nobody shares a balance or a PIN lock. */
+    public Wallet createDemoWallet(String owner, String pin, long balance) {
+        synchronized (lock) {
+            String id;
+            do {
+                id = "W" + randomCode(9);
+            } while (wallets.containsKey(id));
+            Wallet w = new Wallet(id, owner, pin, balance);
+            wallets.put(id, w);
+            return w;
+        }
+    }
+
+    /** Tops a wallet back up and clears its PIN lock. */
+    public Wallet resetWallet(String walletId, long balance) {
+        synchronized (lock) {
+            Wallet w = wallet(walletId);
+            w.reset(balance);
+            return w;
+        }
+    }
+
     // ------------------------------------------------------------------ merchant side
 
     public Invoice.View createInvoice(String merchantId, long amount, String note, Duration ttl) {
@@ -99,6 +129,7 @@ public final class PaymentService {
             String payload = QrisPayload.build(m, amount, id);
             Invoice inv = new Invoice(id, m.id(), amount, note == null ? "" : note.strip(), payload, now, now.plus(ttl));
             invoices.put(id, inv);
+            trimInvoices();
             view = inv.view();
         }
         publish(new PaymentEvent(PaymentEvent.Type.INVOICE_CREATED, view, null));
@@ -301,6 +332,37 @@ public final class PaymentService {
             throw new PaymentException(PaymentException.Code.NOT_FOUND, "Tagihan " + id + " tidak ditemukan");
         }
         return inv;
+    }
+
+    private void trimInvoices() {
+        if (invoices.size() <= MAX_INVOICES) {
+            return;
+        }
+        String victim = null;
+        for (Invoice inv : invoices.values()) {
+            if (inv.status().isFinal()) {
+                victim = inv.id();
+                break;
+            }
+        }
+        invoices.remove(victim != null ? victim : invoices.keySet().iterator().next());
+    }
+
+    private static <K, V> Map<K, V> bounded(int max) {
+        return new LinkedHashMap<>() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                return size() > max;
+            }
+        };
+    }
+
+    int invoiceCount() {
+        synchronized (lock) {
+            return invoices.size();
+        }
     }
 
     private static boolean expireIfDue(Invoice inv, Instant now) {

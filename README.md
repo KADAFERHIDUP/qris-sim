@@ -39,6 +39,7 @@ JDK saja, tanpa framework, supaya tiap bagian protokolnya kelihatan jelas.
 | Webhook palsu atau diputar ulang | HMAC-SHA256 atas `timestamp.body`, dibandingkan dengan waktu konstan, salinan yang lebih dari 5 menit ditolak |
 | Merchant sedang mati | Retry dengan jeda 2, 4, 8, 16, 32 detik; event id tetap sama supaya merchant bisa membuang duplikat |
 | Nominal di luar aturan | Rp1 sampai Rp10.000.000 per transaksi, sesuai batas QRIS |
+| Demo publik dipakai banyak orang | Dompet terpisah per pengunjung; penyimpanan tagihan, pembayaran, dan dompet dibatasi supaya memori tidak terus tumbuh |
 
 ## Alur
 
@@ -75,7 +76,7 @@ mvn package
 java -jar target/qris-sim.jar
 ```
 
-Buka <http://localhost:8080>. Dompet demo milik Ahmad Umraithi dengan saldo Rp500.000 dan PIN `123456`.
+Buka <http://localhost:8080>. Setiap browser otomatis mendapat dompet demo sendiri atas nama Ahmad Umraithi dengan saldo Rp500.000 dan PIN `123456`, jadi salah PIN di satu browser tidak mengunci pengunjung lain. Tombol **Isi ulang saldo** mengembalikan saldo dan membuka kunci PIN.
 
 | Variabel | Default | Fungsi |
 |---|---|---|
@@ -95,7 +96,9 @@ Semua body JSON. Error selalu berbentuk `{"error": {"code": "...", "message": ".
 | `GET` | `/api/merchants/{id}/static-qr` | Payload QR statis |
 | `POST` | `/api/qris/decode` | Baca payload, cek apakah bisa dibayar |
 | `POST` | `/api/payments` | Bayar: `payload`, `wallet_id`, `pin`, `amount` (QR statis saja) + header `Idempotency-Key` |
+| `POST` | `/api/wallets` | Buat dompet demo baru (saldo Rp500.000) |
 | `GET` | `/api/wallets/{id}` | Saldo dan status kunci PIN |
+| `POST` | `/api/wallets/{id}/reset` | Isi ulang saldo dan buka kunci PIN |
 | `GET` | `/api/webhooks/deliveries` | 100 percobaan kirim webhook terakhir |
 | `GET` | `/api/events` | Server-Sent Events: `payment` dan `webhook` |
 | `GET`/`POST` | `/demo-merchant` | Status merchant demo; `{"fail_next": 2}` menggagalkan dua kiriman berikutnya |
@@ -148,7 +151,7 @@ src/main/resources/web/   tampilan (HTML, CSS, JS tanpa framework)
 mvn verify
 ```
 
-63 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
+67 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
 16 pembayar yang berebut satu tagihan, sampai server sungguhan yang dinyalakan di port acak
 untuk menguji alur bayar, retry webhook, dan stream SSE. CI juga membangun image Docker
 dan menunggu sampai container sehat.
