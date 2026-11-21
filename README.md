@@ -40,6 +40,7 @@ JDK saja, tanpa framework, supaya tiap bagian protokolnya kelihatan jelas.
 | Merchant sedang mati | Retry dengan jeda 2, 4, 8, 16, 32 detik; event id tetap sama supaya merchant bisa membuang duplikat |
 | Nominal di luar aturan | Rp1 sampai Rp10.000.000 per transaksi, sesuai batas QRIS |
 | Demo publik dipakai banyak orang | Dompet terpisah per pengunjung; penyimpanan tagihan, pembayaran, dan dompet dibatasi supaya memori tidak terus tumbuh |
+| Banjir permintaan dari satu orang | Token bucket per IP untuk semua POST; kelebihannya dijawab 429 dengan header `Retry-After` |
 
 ## Alur
 
@@ -83,6 +84,7 @@ Buka <http://localhost:8080>. Setiap browser otomatis mendapat dompet demo sendi
 | `PORT` | `8080` | Port HTTP |
 | `DEMO_PIN` | `123456` | PIN dompet demo |
 | `WEBHOOK_SECRET` | acak saat start | Secret HMAC bersama merchant demo, minimal 16 karakter |
+| `RATE_LIMIT_PER_MINUTE` | `60` | Batas permintaan POST per alamat IP per menit (lonjakan sampai setengahnya diizinkan) |
 
 ## API
 
@@ -151,7 +153,7 @@ src/main/resources/web/   tampilan (HTML, CSS, JS tanpa framework)
 mvn verify
 ```
 
-67 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
+72 test JUnit 5, mulai dari vektor uji CRC16 dan HMAC (RFC 4231), aturan status tagihan,
 16 pembayar yang berebut satu tagihan, sampai server sungguhan yang dinyalakan di port acak
 untuk menguji alur bayar, retry webhook, dan stream SSE. CI juga membangun image Docker
 dan menunggu sampai container sehat.

@@ -45,10 +45,12 @@ public final class Api implements HttpHandler {
     private final EventHub hub;
     private final StaticFiles files;
     private final DemoWallet demoWallet;
+    private final RateLimiter writes;
 
     public Api(PaymentService svc, WebhookDispatcher webhooks, Map<String, WebhookEndpoint> endpoints, DemoMerchant demo,
-               EventHub hub, StaticFiles files, DemoWallet demoWallet) {
+               EventHub hub, StaticFiles files, DemoWallet demoWallet, RateLimiter writes) {
         this.demoWallet = demoWallet;
+        this.writes = writes;
         this.svc = svc;
         this.webhooks = webhooks;
         this.endpoints = endpoints;
@@ -62,6 +64,7 @@ public final class Api implements HttpHandler {
         try (ex) {
             securityHeaders(ex);
             try {
+                limit(ex);
                 route(ex);
             } catch (PaymentException e) {
                 error(ex, e.code().httpStatus(), e.code().name(), e.getMessage());
@@ -158,6 +161,33 @@ public final class Api implements HttpHandler {
         } else {
             throw new ApiException(404, "NOT_FOUND", "Rute tidak ada");
         }
+    }
+
+    /** Every POST from outside counts against its sender; the built-in merchant's own webhook calls do not. */
+    private void limit(HttpExchange ex) {
+        if (!ex.getRequestMethod().equals("POST") || ex.getRequestURI().getPath().equals("/demo-merchant/webhook")) {
+            return;
+        }
+        long wait = writes.acquire(clientIp(ex));
+        if (wait > 0) {
+            ex.getResponseHeaders().set("Retry-After", Long.toString(wait));
+            throw new ApiException(429, "RATE_LIMITED", "Terlalu banyak permintaan. Coba lagi dalam " + wait + " detik");
+        }
+    }
+
+    /**
+     * The visitor's address. Behind a hosting proxy every request arrives from the proxy, so the
+     * first X-Forwarded-For entry is used when present.
+     */
+    static String clientIp(HttpExchange ex) {
+        String xff = ex.getRequestHeaders().getFirst("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            String first = xff.split(",")[0].strip();
+            if (first.length() <= 45) {
+                return first;
+            }
+        }
+        return ex.getRemoteAddress().getAddress().getHostAddress();
     }
 
     private Map<String, Object> decode(String payload) {
